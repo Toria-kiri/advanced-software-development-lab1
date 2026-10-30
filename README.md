@@ -2,7 +2,7 @@
 
 《高级软件开发技术》Lab1 Phase 1：基于 TypeScript 的命令行 SVG 编辑器。
 
-> **当前状态：PR 01 工程初始化已实现。** 已配置 TypeScript 构建、类型检查和最小自动化测试；程序只输出启动消息。下文的 SVG 编辑能力均为计划，实际实现进度以代码、测试和 Git 历史为准。
+> **当前状态：PR 03 核心模型已实现，待人工验收。** PR 02 已合并；`src/model/` 已包含六种图形、文档树、集中工厂与深拷贝，测试覆盖模型行为。CLI 尚未接入模型，程序仍只输出启动消息；下文命令行 SVG 编辑能力仍为计划。
 
 ## 1. 项目目标
 
@@ -77,7 +77,7 @@ npm test
 npm run dev
 ```
 
-其中 `build` 编译源码到 `dist/`，`start` 运行已编译入口，`dev` 构建后运行，`typecheck` 检查源码和测试的类型。`test` 先构建程序，再用独立配置编译测试，最后使用 Node.js 内置测试工具验证程序退出状态与启动输出。
+其中 `build` 编译源码到 `dist/`，`start` 运行已编译入口，`dev` 构建后运行，`typecheck` 检查源码和测试的类型。`test` 先构建程序，再用独立配置编译测试，最后使用 Node.js 内置测试工具执行 `tests/*.test.ts` 对应的全部测试（模型行为及启动 smoke test）。
 
 Windows PowerShell 若因执行策略无法运行 `npm.ps1`，将上述 `npm` 换成 `npm.cmd`，例如 `npm.cmd test`；无需修改系统执行策略。
 
@@ -125,7 +125,7 @@ SVG Editor CLI started!
 | --- | --- | --- |
 | PR 01 | `chore/INIT-001-project-setup` | 初始化 TypeScript 工程、基础目录及构建验证 |
 | PR 02 | `docs/ARCH-001-design` | 明确模块职责、依赖方向、Command / Composite 设计 |
-| PR 03 | `feat/CORE-001-shape-model` | 实现图形类、文档模型、层级与 ID 管理 |
+| PR 03 | `feat/MODEL-001-shape-document` | 实现图形类、文档模型、层级与 ID 管理 |
 | PR 04 | `feat/CLI-001-command-infrastructure` | 实现 REPL、解析分发和命令执行框架 |
 | PR 05 | `feat/EDIT-001-shape-operations` | 实现图形创建、删除及属性和几何编辑 |
 | PR 06 | `feat/EDIT-002-group-operations` | 实现分组、解组、归属变更和层级顺序 |
