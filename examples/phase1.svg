@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect id="background" x="0" y="0" width="800" height="600" fill="#ffffff"/>
+  <g id="scene" fill="#4a90d9">
+    <ellipse id="marker" cx="350" cy="280" rx="80" ry="35"/>
+    <g id="left">
+      <rect id="start" x="60" y="100" width="180" height="80"/>
+      <text id="start-label" x="80" y="145" fill="white">开始 &lt;&amp;&gt; # Phase 1</text>
+    </g>
+    <g id="right">
+      <circle id="end" cx="530" cy="160" r="50" fill="#f5a623"/>
+      <text id="end-label" x="505" y="165" fill="black">完成</text>
+    </g>
+    <line id="edge" x1="240" y1="140" x2="480" y2="140" stroke="#333333" stroke-width="3"/>
+  </g>
+</svg>
