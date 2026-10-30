@@ -365,3 +365,19 @@ D3：跨容器group放在最深公共祖先下面，插入最早被选择的图�
 D4：方案A更符合任务书中“无参数时保存到读入时的路径”这句话。
 D5：首先保证六种内置图形、嵌套容器、基本样式、几何属性以及文本能够正确读取和保存。对于尚未支持、且会影响实际效果的 transform、非默认 viewBox 映射等内容明确报错。
 D6：采用当前这套模块设计。
+
+## 13. PR 03 实现对应说明（2026-10-29）
+
+第 12 节 D1–D6 的人工结论保持不变。§3、§4、§7 的图继续表示整体目标架构；本轮仅完成其中 model 部分，实际实现图与验证记录见课程报告 PR 03 小节。Command、历史管理、XML 解析/写出和 REPL 均未实现，不能将模型 clone 测试当作 Undo/Redo 验收。
+
+- `Shape.ts` 使用 ECMAScript `#id`、`#style`，各叶子使用私有几何字段及只读 getter。`move/scale` 使用“准备计算 → 赋值”的模板方法，叶子计算自己的几何，Group 递归准备所有后代后再统一赋值；包含有限输入运算溢出的失败原子性。`setAttribute` 在赋值前完成白名单及值校验。
+- `Group.ts` 的 children 数组在构造时复制并冻结，没有结构写入方法。`withChildren` 只构造新的 Group，保留自身样式并复用传入节点，不改变原组；**只有 `clone()` 才深拷贝全部后代**。Document 负责将重建后的树及全部索引一起提交。此处把 §4 的模型内部编辑协议细化为不可变成员序列，避免增加可被外部调用的 mutator 或导出能力令牌；不改变 Document 独占文档结构写入的 D6。
+- Document 构造/insert 在检查重复 id 后克隆输入，调用者修改传入对象不会影响已接管文档。`insert` 返回文档拥有的节点。结构操作可替换祖先 Group 对象，因此调用者应保存 id，操作后重新 `find(id)`，不要依赖旧 Group 引用继续指向当前树。未受影响叶子的引用可复用；`Document.clone()` 与原文档无共享节点。
+- Document 的 `idIndex` 与含 `parentId/position` 的 `parentIndex` 均为私有字段；`validate()` 重新遍历树，校验引用、全局 id、父关系和顺序索引。`getRoots/getChildren/getStyle/describe/toSvgNode` 不暴露可写集合。`instanceof Group` 仅用于识别结构容器，不用于分派各叶子的几何行为。
+- ShapeFactory 内一张私有 Map 集中六种构造定义，create 参数和 fromSvgNode 复用同一映射，仍是唯一图形类型名分派点；未知类型报任务书模板错误。`ModelValue` 只复用标量校验，`ModelError` 提供单行 `error:` 消息，均无按图形类型分派或跨层依赖。
+- `SvgNode` 是 XML 中立的只读标签、属性、children 和可选 text；`ShapeDescription` 与 `ShapeStyle` 是只读接口，不替代富行为图形对象。文本保持原值不转义。`fromSvgNode` 仅适配已解析、已补齐 id 和必需几何属性的节点；不解析 XML，不分配缺失 id，不加载插件。未来 IO 负责解析及 SVG 缺省几何值规范化；本轮只验证模型生成节点的往返，未声称支持任意外部 SVG。未知属性不静默丢失，循环中立节点输入报错。
+- **本轮用户已确认的补充规则**：画布宽高为有限正数；图形尺寸/半径/stroke-width 为有限非负数（允许 0）；group 至少一个目标、重复 id 报错且不修改状态。坐标允许负数和浮点数。它们是本轮会话确认的规则，不倒写为原始任务书强制条款。
+
+**【人工核对】[已核验]** 请核对 Group 不可变成员序列与 Document 重建提交是否符合 D6；用 `tests/document.test.ts` 的嵌套 D3 用例复核落点及顺序，用 `tests/shapes.test.ts` 的溢出用例复核失败原子性。核对结果：首先，Document 在结构修改过程中可能替换 Group 对象，因此旧对象引用不一定继续代表当前文档中的节点。考虑到后续采用完整快照实现 Undo/Redo，我倾向于让 Command 保存图形 ID，并在执行时通过当前 Document 重新定位目标，避免使用过期对象引用。
+其次，Document 插入图形时采用深拷贝，能够防止外部对象引用绕过 Document 修改内部结构。这与模型封装及结构一致性的设计目标相符。
+最后，跨父分组采用 D3 规则，保留被选元素之间的相对绘制顺序，但不保证 group 后再 ungroup 能恢复原始层级顺序。这里需要区分 ungroup 的结构操作语义与 undo 的历史恢复语义。完整快照方案可以在 undo 时精确恢复原始文档。。
