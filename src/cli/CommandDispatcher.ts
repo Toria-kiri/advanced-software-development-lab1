@@ -15,6 +15,8 @@ import { SetCommand } from "../commands/SetCommand";
 import { ShowCommand } from "../commands/ShowCommand";
 import { TreeCommand } from "../commands/TreeCommand";
 import { UngroupCommand } from "../commands/UngroupCommand";
+import { ReadCommand } from "../commands/ReadCommand";
+import { SaveCommand } from "../commands/SaveCommand";
 import { ModelError } from "../model/ModelError";
 import { ModelValue } from "../model/ModelValue";
 import { CliRenderer } from "./CliRenderer";
@@ -30,6 +32,10 @@ interface CommandDefinition {
 }
 
 export class CommandDispatcher {
+  readonly #store: ConstructorParameters<typeof ReadCommand>[0];
+
+  constructor(store: ConstructorParameters<typeof ReadCommand>[0]) { this.#store = store; }
+
   // The only command-name dispatch point, including presentation selection.
   // A future plugin phase may replace this fixed map with registration.
   readonly #definitions = new Map<string, CommandDefinition>([
@@ -109,11 +115,13 @@ export class CommandDispatcher {
     ["redo", { syntax: "redo", description: "重做一次编辑", build: a => {
       this.count(a, 0); return { execute: async (e, r) => r.render(await e.redo(), d => `redid ${d.command}`) };
     } }],
-    ["read", { syntax: "read <file.svg>", description: "尚未实现，留待 PR06", build: a => {
-      this.count(a, 1); throw new ModelError("read is not implemented yet (planned for PR06)");
+    ["read", { syntax: "read <file.svg>", description: "读取 SVG，补齐缺失 ID，建立历史边界", build: a => {
+      this.count(a, 1); return this.command(new ReadCommand(this.#store, a[0].value),
+        (r, d) => `read ${r.line(d.path)} (${d.size} elements, ${d.width}x${d.height})`);
     } }],
-    ["save", { syntax: "save [file.svg]", description: "尚未实现，留待 PR06", build: a => {
-      this.count(a, 0, 1); throw new ModelError("save is not implemented yet (planned for PR06)");
+    ["save", { syntax: "save [file.svg]", description: "保存 SVG；省略路径使用最近 read 的路径", build: a => {
+      this.count(a, 0, 1); return this.command(new SaveCommand(this.#store, a[0]?.value),
+        (r, d) => `saved to ${r.line(d.path)} (${d.size} elements)`);
     } }],
   ]);
 

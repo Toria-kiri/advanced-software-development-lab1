@@ -9,13 +9,17 @@ import { Document } from "../src/model/Document";
 import { Group } from "../src/model/Group";
 import { Rect } from "../src/model/Rect";
 import { Text } from "../src/model/Text";
+import { ModelError } from "../src/model/ModelError";
 
 const parser = new CommandParser(), renderer = new CliRenderer();
 function fixture() {
   const session = new EditorSession(new Document(100, 100, [new Group("scene", [
     new Group("inner", [new Rect("r", 1, 2, 3, 4)]), new Rect("other", 5, 6, 7, 8), new Text("t", 1, 2, "old"),
   ])]), "input.svg");
-  const executor = new CommandExecutor(session), dispatcher = new CommandDispatcher();
+  const executor = new CommandExecutor(session), dispatcher = new CommandDispatcher({
+    async read(path: string): Promise<never> { throw new ModelError(`cannot read file: ${path}`); },
+    async write(path: string): Promise<never> { throw new ModelError(`cannot write file: ${path}`); },
+  });
   return { session, dispatcher, run: (line: string) => dispatcher.create(parser.tokenize(line)).execute(executor, renderer) };
 }
 const members = (d: Document, id: string) => (d.find(id) as Group).getChildren().map(s => s.id);
@@ -80,7 +84,8 @@ test("tree/show/help route through query Commands and preserve pending redo", as
   for (const entry of dispatcher.helpEntries()) assert.ok(help.includes(entry.syntax));
   assert.ok(help.includes('create text <id> <x> <y> "content"'));
   assert.ok(help.includes("create rect <id> <x> <y> <w> <h> [fill]"));
-  assert.match(help, /尚未实现，留待 PR06/);
+  assert.match(help, /读取 SVG/);
+  assert.match(help, /最近 read 的路径/);
   assert.deepEqual(session.historyStatus, before);
   await run("redo");
   assert.equal(session.requireDocument().find("r").getAttribute("x"), 2);
@@ -124,11 +129,12 @@ test("invalid dispatch and domain arguments preserve document, path, redo and bl
   assert.equal(session.requireDocument().find("r").getAttribute("x"), 2);
 });
 
-test("read/save report unimplemented without executing IO or changing state", async () => {
+test("read/save store failures preserve document and history", async () => {
   const { session, run } = fixture();
   const node = session.requireDocument().toSvgNode(), status = session.historyStatus;
-  for (const line of ['read "some file.svg"', "save", "save output.svg"]) {
-    await assert.rejects(async () => run(line), /is not implemented yet \(planned for PR06\)/);
+  for (const [line, message] of [['read "some file.svg"', "error: cannot read file: some file.svg"],
+    ["save", "error: cannot write file: input.svg"], ["save output.svg", "error: cannot write file: output.svg"]]) {
+    await assert.rejects(async () => run(line), { message });
     assert.deepEqual(session.requireDocument().toSvgNode(), node);
     assert.deepEqual(session.historyStatus, status);
   }

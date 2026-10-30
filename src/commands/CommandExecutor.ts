@@ -24,6 +24,9 @@ export class CommandExecutor {
       const raw = await command.execute(context);
       // Result materialization may also fail; it must finish before committing state.
       const result = new CommandResult(raw.operation, raw.data, raw.warnings);
+      if (context.hasBeforeCommit && effect !== "boundary") {
+        throw new ModelError("external writes require a boundary command");
+      }
       if (effect === "query") return result;
       const candidate = context.requireDocument();
       candidate.validate();
@@ -37,6 +40,9 @@ export class CommandExecutor {
         ? state.history.record(command.name, state.document!, document)
         : state.history.blockAndClear();
       const prepared = Object.freeze({ document, readPath: context.readPath, history });
+      // Prepare the write's isolated input too, before touching the filesystem.
+      const beforeCommit = context.prepareBeforeCommit(document);
+      if (beforeCommit) await beforeCommit();
       this.#controller.commit(prepared);
       return result;
     });
