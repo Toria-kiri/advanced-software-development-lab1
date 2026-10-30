@@ -381,3 +381,83 @@ D6：采用当前这套模块设计。
 **【人工核对】[已核验]** 请核对 Group 不可变成员序列与 Document 重建提交是否符合 D6；用 `tests/document.test.ts` 的嵌套 D3 用例复核落点及顺序，用 `tests/shapes.test.ts` 的溢出用例复核失败原子性。核对结果：首先，Document 在结构修改过程中可能替换 Group 对象，因此旧对象引用不一定继续代表当前文档中的节点。考虑到后续采用完整快照实现 Undo/Redo，我倾向于让 Command 保存图形 ID，并在执行时通过当前 Document 重新定位目标，避免使用过期对象引用。
 其次，Document 插入图形时采用深拷贝，能够防止外部对象引用绕过 Document 修改内部结构。这与模型封装及结构一致性的设计目标相符。
 最后，跨父分组采用 D3 规则，保留被选元素之间的相对绘制顺序，但不保证 group 后再 ungroup 能恢复原始层级顺序。这里需要区分 ungroup 的结构操作语义与 undo 的历史恢复语义。完整快照方案可以在 undo 时精确恢复原始文档。。
+
+## 14. PR 04 Command 与完整快照历史实现（2026-10-30）
+
+本节为当前实际实现说明，§3/§4/§7 保留为整体目标设计与历史依据，D1–D6 人工决定不变。本轮没有实现 CLI/Parser/Dispatcher/Renderer，也没有实现 ReadCommand、SaveCommand 或磁盘/XML 读写。实际依赖是 commands → model、io/SvgStore 接口 → model；Commands 当前未消费存储接口，未来 Read/Save 通过构造注入 SvgStore，而不是直接依赖 SvgFileStore。
+
+### 14.1 组件与接口对应
+
+- `Command<T>`：只读 name、effect（edit/boundary/query）、可选 requiresDocument 及异步 execute(context)。具体命令独立成类，只保存 id/标量/已复制的参数数组，使用 PR03 公开方法。十种编辑命令均已实现；Init、Canvas、Tree、Show、Help 也已实现。Canvas 根据是否有尺寸参数决定 effect；缺一个尺寸执行失败，不误当查询。
+- `CommandContext`：命令局部草稿 Document 与 readPath，提供 requireDocument/replaceDocument；没有 EditorSession 引用和提交权限。Init 用新 Document 替换草稿并清除路径；Canvas 和编辑保留路径。未来 read 可在草稿上声明新文档/路径，再由 Executor 协调提交。
+- `CommandResult<T>`：成功标志、操作名、结构化 DTO 和警告；复制并冻结数据/警告。失败以带 `error:` 前缀的 ModelError 抛出，不返回成功、不直接打印。DTO 用普通对象/数组/标量，不传 Document/Shape 等活对象；Tree 返回层级、关键属性、parentId 和 position，Show 返回单节点详情；终端树字符/列对齐留给 Renderer。
+- `EditorSession`：私有状态持有 Document、readPath、CommandHistory；公开访问文档时返回深副本。通过一次性的 claimController 将状态读取/提交闭包绑定给一个 Executor，绑定后不能再获取控制器或创建第二个 Executor。该协议仅用于组合启动，不传给具体命令，不是业务入口。初始可注入文档/路径作为组合或测试基线；这不代表已经执行 read，初始历史为空且未 blocked。
+- `CommandHistory`：不可变历史状态对象，私有前后快照和两栈；record、blockAndClear、prepareUndo、prepareRedo 返回新历史/恢复文档，不修改原历史。栈条目保存命令名用于身份反馈，Redo 恢复 after 快照，不重执行命令或使用逆向几何运算。
+- `CommandExecutor`：调用 Command 多态，不按 name 分派；准备全部新状态后由控制器一次替换 Session 状态引用。结果、草稿、活文档与历史快照相互隔离。
+- `src/io/SvgStore.ts`：仅 read(path) → Document + warnings、write(path, document) → void 的异步接口契约，没有实现类、测试假保存行为或文件系统依赖。D4 的默认 save 路径/写入失败行为仍待真正 Read/Save 编排验证。
+
+### 14.2 实际执行与异常安全
+
+1. 检查执行器是否空闲，并读取命令 effect。除 Init 外，已实现命令均遵循任务书“无文档先 init/read”的规则，包含 help；这是 §11 原建议的严格默认，没有增加豁免。
+2. 从会话当前文档 clone 候选，构造局部 Context，await Command.execute。query 同样在副本上运行，结果完成复制后直接返回，丢弃草稿，不提交任何状态。
+3. 对 edit/boundary 完成结果复制、候选 validate；edit 若试图改变 readPath 则拒绝。再 clone 并 validate 新活文档，防止 Command 保留草稿后修改会话。
+4. edit 调用 History.record，从原活文档/新活文档分别 clone 独立 before/after，准备新栈；boundary 准备清空且 blocked 的新历史。此时所有可失败的克隆、校验、结果复制、数组准备均已完成。
+5. 构造完整 prepared 状态并冻结，再以一次私有字段赋值提交 Document、readPath 与 History；提交后没有用户回调、克隆或 IO。失败只抛错误并解除 busy，旧状态引用不变。
+
+Undo/Redo 同样先 clone 恢复目标、validate、准备新历史和反馈结果，最后一次提交；readPath 保留。边界成功后两栈清空且 blocked=true；失败及查询不影响 blocked。下一次成功编辑解除封锁，其 before 是边界后的文档；之后 undo 不能穿越原边界。成功但数值未变的编辑仍记录一单元。空栈错误采用 `error: nothing to undo` / `error: nothing to redo`，blocked 优先使用任务书的 `error: undo not allowed after io command`（两方向同模板）。这些空栈措辞是实现约定，不宣称为任务书原文。
+
+### 14.3 并发与取舍
+
+每个 Session 只绑定一个 Executor；execute/undo/redo 共用 busy 标记。重叠调用立即拒绝 `error: command executor is busy`，不会排队或执行其命令；调用方应逐次 await。失败后也会解除 busy。不同 Session 可并行。此选择明确限制调用方式并有异步 gate 测试，没有增加通用调度框架。
+
+为限制活状态和历史被外部引用修改，编辑会有候选、提交副本以及 before/after 的额外克隆；query 和会话检查也会克隆文档。代价是时间/内存开销，本阶段优先保证隔离和可审查性，未增加历史数量限制或声称通过性能基准。CommandHistory 由 Session 的原子状态持有，而非 Executor 中另设可变字段，这是对原拟定类图的状态归属细化，职责仍是 Session 管当前状态、History 管历史、Executor 协调提交。
+
+```plantuml
+@startuml
+title PR04 实际命令与状态依赖（CLI/真实IO待实现）
+package "src/commands" {
+  interface Command
+  class "15 个具体命令" as Concrete
+  class CommandContext
+  class CommandResult
+  class CommandExecutor
+  class EditorSession
+  class CommandHistory
+  Concrete ..|> Command
+  Concrete --> CommandContext
+  Concrete --> CommandResult
+  CommandExecutor --> Command : execute
+  CommandExecutor --> CommandContext : 隔离草稿
+  CommandExecutor --> EditorSession : 一次绑定/提交闭包
+  EditorSession --> CommandHistory : 原子状态持有
+  CommandExecutor ..> CommandHistory : 准备历史转移
+}
+package "src/model" {
+  class Document
+  abstract class Shape
+}
+package "src/io（仅契约）" {
+  interface SvgStore
+}
+CommandContext --> Document
+CommandHistory --> Document : 独立快照
+EditorSession --> Document : 当前文档
+Concrete --> Document : 公开行为
+Document --> Shape
+SvgStore --> Document
+@enduml
+```
+
+![pic](./pics/pr04_actual_command_state.png "pic")
+
+本图源码未通过渲染器验证；源码依赖和一类一文件已静态检查。实际 Read/Save、XML、终端交互、最终格式及性能仍未验证。
+
+**【人工核对】[已核验]** 请核对单 Executor/逐次 await 的调用约定、查询副本、Session 原子状态提交与 D1/D6 一致；检查 `tests/command-atomicity.test.ts` 故障注入及 `tests/command-history.test.ts` 的边界用例。结论：顺序执行与并发约束：当前实现采用单 Session、单 Executor，同一执行器的重叠调用会被拒绝。认可这一接口约定，后续 CLI 需逐条 await 命令执行完成，防止异步操作交错覆盖状态。
+
+查询副本隔离：查询命令在文档副本上执行，外部查看 Session 状态也返回独立副本，避免查询或外部引用意外修改正式 Document。该设计符合模型封装要求。
+
+Session 原子提交：Document、readPath 和 CommandHistory 统一保存在 SessionState 中，所有候选修改与历史准备完成后，通过一次状态替换提交。该实现符合 D1 完整快照和 D6 模块职责划分的既定方案。
+
+故障注入测试：tests/command-atomicity.test.ts 覆盖候选执行异常、校验失败、克隆失败、历史准备失败、结果准备失败、Undo/Redo 恢复异常以及重叠调用等情况。测试重点检查失败后正式文档、历史状态和路径是否保持一致。
+
+历史边界测试：tests/command-history.test.ts 覆盖 Undo/Redo、Redo 保留、init/canvas 历史边界、查询不影响历史、失败编辑不解除 blocked，以及历史快照独立性等行为。。
