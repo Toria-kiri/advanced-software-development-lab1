@@ -6,6 +6,43 @@
 
 ## 1. 架构方案
 
+### PR 05 CLI 集成（2026-10-30，待人工验收）
+
+当前在 `feat/CLI-001-interactive-editor` 将 PR03 Model 与 PR04 Commands 接入真实终端入口；没有重写模型、执行器或历史。实际组件、接口、词法规则与图见 [architecture.md §15](architecture.md#15-pr-05-cli-实际架构2026-10-30)。Read/Save 仅输出尚未实现，真实 SVG IO 留待 PR06。
+
+| 实际文件 | 职责 |
+|---|---|
+| `src/cli/CliRepl.ts` | 注入同一执行器；readline 异步逐行 await；提示符、EOF、逐行错误恢复与流关闭 |
+| `src/cli/CommandParser.ts` | 无业务状态的词法拆分，冻结 value/quoted tokens，处理空白、引号、注释和非法控制字符 |
+| `src/cli/CommandDispatcher.ts` | 唯一命令名映射，构造 15 种现有 Command，路由 Undo/Redo，绑定格式回调，提供 19 种命令的帮助 |
+| `src/cli/CliRenderer.ts` | 排版结构化结果、显式样式、tree/show/help、警告与错误；不查改文档或历史 |
+| `src/main.ts`、`package.json` | 单 Session/Executor 的组合入口；新增 `npm run cli`（先构建再启动），保留 start/dev/build/typecheck/test |
+
+```plantuml
+@startuml
+title PR05 实际模块依赖
+component "main.ts（组合）" as Main
+package "cli（四个核心类）" as CLI
+package "commands（PR04 未改）" as Commands
+package "model（PR03 模型，已补充 create HEX 校验）" as Model
+package "io（仅既有 SvgStore 契约）" as IO
+Main --> CLI
+Main --> Commands
+CLI --> Commands
+CLI --> Model : 只读描述/通用数值校验/错误类型
+Commands --> Model
+IO --> Model
+@enduml
+```
+
+设计取舍：Dispatcher 同时绑定命令构造与类型安全的渲染回调，Renderer 不再按 operation 名称选择实现；图形类型仍仅由 Factory 分派。普通编辑经 Executor.execute；Undo/Redo 经原历史入口，REPL 不直接执行 Command.execute。候选、正式文档、历史隔离及单执行器约定保持 PR04 不变；创建/属性的专属校验复用模型而不复制类型映射。只新增四个类及必要的 token/action 接口，无第三方 CLI 框架。
+
+对原方案的细化及纠偏：注释严格采用任务书与原草案的独立整行规则；AI 生成提示词引入的行尾注释要求经人工审核已删除，命令中的 `#` 一律作为普通参数保留，颜色不被截断。双引号不支持转义、必须包裹完整参数；quoted 保留以区别文本 `"in"`。Init 单宽度沿用已有构造器的默认高度 600，Canvas 仍只接受 0/2 个参数。不新增退出命令，以 EOF 结束。模块、接口及 D1–D6 无变化；纠偏案例见 §2.2，具体规则见 architecture.md §15.2。
+
+2026-10-31 补充：用户进一步发现 create 的单个非法 # 颜色可被接受。现由 ShapeFactory.create 的既有可选样式分支校验：颜色去除两端空白后若以 # 开头，必须是 3/4/6/8 位 HEX（仅 0–9/a–f/A–F），否则拒绝且不改变文档/历史。普通颜色名和非颜色位置的 # 保留。仅修改模型工厂这一校验点，模块职责和接口不变；这是本轮人工补充约束，不冒充任务书原文。
+
+**【人工核对】[已核验]** 请对照四个 CLI 类和 main 核验实际图、单会话逐行 await、两处名称分派与词法规则；确认没有实现真实 IO。结论：已在终端手动验证新建、合法命令和非法命令、undo/redo、改变画布尺寸等操作，没有问题。
+
 ### PR 04 Command 与快照历史（2026-10-30，已人工验收）
 
 当前在 `feat/CMD-001-command-execution` 完成命令层，复用 PR03 模型，已确认 D1–D6 保持不变。整体架构目标图和历史记录继续保留；本轮实际组件及取舍见 [architecture.md §14](architecture.md#14-pr-04-command-与完整快照历史实现2026-10-30)。
@@ -266,6 +303,21 @@ import { CommandDispatcher } from "../cli/CommandDispatcher";
 - 如何验证与修正（文件、测试、结果）：明确规定Dispatcher 创建 HelpCommand 时直接把数据给它，这样HelpCommand 只知道自己收到了一段帮助文字，完全不知道文字由谁提供。
 
 
+**案例编号：[002-PR5中AI提示词扩展注释需求的纠偏]**
+
+- 工程背景/遇到的问题：PR05 为 SVG 编辑器实现 CLI 词法解析。任务书规定以 `#` 开头的输入行为注释，同时合法命令示例使用 `#4a90d9` 等 RGB 颜色参数，需要区分独立注释行与命令中的普通字符。
+- AI 原建议（如有，保留可追溯摘要）：AI 生成的 PR05 需求提示词额外要求支持行尾注释，并给出以下示例，要求忽略引号外的注释：
+```text
+set t1 text "A # B" # comment
+```
+初版实现据此将行内独立的 `#` 及之后内容截断，虽然保留了 `#4a90d9`，仍然扩展了任务书没有要求的语法。
+- 我发现的问题与判断理由：人工对照原任务书发现，原文只要求 `#` 开头的行为注释，没有要求行尾注释。为避免与颜色代码及普通文本中的 `#` 混淆，用户明确决定注释必须另起一行单独列出，并删除 AI 提示词中的行尾注释要求。生成的开发提示词需要回到任务书逐项审核，不能自动升级为权威需求。
+
+2026-10-31 继续人工测试时，用户发现首次修正仍有遗漏：create 的一个可选颜色参数即使是 `#12`、`#zi` 或 `#中文`，参数数量也合法，而原工厂只验证字符串类型，因此仍会创建成功。取消注释截断和检查参数数量并不等于校验了颜色内容，必须根据参数语义验证；用户据此要求拒绝不符合 HEX 的 # 颜色。该限制只用于颜色参数，不能误伤 ID 或文本中的 #。
+- 如何验证与修正（文件、测试、结果）：删除 `src/cli/CommandParser.ts` 中行内 `#` 截断分支，保留独立整行注释判断。修改 `tests/cli-parser.test.ts`，验证命令中的 `#` 和其后 token 不会丢失；修改分发与集成测试，验证追加 `# comment` 导致参数过多时会报错且文档/历史不变，同时颜色、引号内文本和字面 `#` 仍正常使用。同步根 README、architecture.md §15.2 和本报告。实际运行 `npm.cmd test` 为 145 项通过、0 失败，`npm.cmd run typecheck` 通过；新增专项运行与检查结果见 §4.10。此次修正依据用户明确审核意见，不代填个人反思或最终验收结论。
+
+本次补漏在 `src/model/ShapeFactory.ts` 的 create 可选样式分支集中验证 3/4/6/8 位 HEX，不在 CLI 新增图形类型分派。`tests/factory.test.ts` 覆盖四种带颜色图形的合法/非法 HEX、命名颜色和缺省样式；CLI 分发/集成测试覆盖引号与空白、失败后文档和索引/路径/Redo/blocked 保持，以及合法颜色、文本 # 和后续命令正常执行。全量 155 项、CLI 专项 58 项、工厂专项 19 项通过，类型检查通过，详见 §4.11。本次发现合并在案例 002，保留首次纠偏事实与运行记录。
+
 ### 2.3 PR 02 会话记录（2026-10-28）
 
 - 分支：`docs/ARCH-001-design`；PR 待创建；commit 待创建，本轮按用户要求不暂存、不提交、不推送、不创建 PR/tag。
@@ -320,7 +372,59 @@ import { CommandDispatcher } from "../cli/CommandDispatcher";
 
 在 `feat/CMD-001-command-execution` 根据本报告已填写的 PR04 人工验收结论，更新根 `README.md` 的当前状态、功能进度、目录职责及 PR04 规划行，并链接架构与测试说明。仅修改根 README 和本报告，保留已有代码及人工结论；PR 待创建、commit 待创建。本轮未发生代表性纠错。
 
+### 2.8 PR 05 CLI 开发记录（2026-10-30）
+
+- 分支 `feat/CLI-001-interactive-editor`；PR 待创建、commit 待创建。本轮开始工作区干净，main 与已获取的 origin/main 均为 `e1f5786`（Merge pull request #4），差异 `0 0`；`88bfd35` 是 main 祖先，PR04 已在本地主线合并。git fetch origin 因 GitHub 443 连接失败，未能刷新远程最新状态；不声称实时远端验证成功。从现有已同步引用的 main 创建指定分支，未暂存、提交、推送、合并或创建 PR/tag。
+- 阅读实际规范、任务书、README/架构/报告、配置、模型、命令、SvgStore 与测试后，新增四个 CLI 类和四份 CLI 测试；修改 main、package.json、smoke.test.ts，删除 cli/.gitkeep；同步根 README、architecture.md §15 和本报告。没有改动 PR03/PR04 业务源码、锁文件、tsconfig、任务书或 AGENTS。
+- AI 方案：用 Dispatcher 的单一固定映射构造动作闭包，将命令与格式回调配对；REPL 只顺序 await 动作，Renderer 不按名字分派。复用 Factory/ModelValue 的严格数字规则和模型白名单，不在 CLI 增加图形类型知识。一次启动仅创建一个 Session/Executor，read/save 直接报告当前未实现，无假保存。
+- 初版按 AI 生成的 PR05 提示词加入行尾注释，采用独立 # 标记以保留颜色。随后用户人工对照任务书发现这是额外扩展，明确要求取消；现已恢复仅独立整行注释，详见 §2.2 案例 002、§2.9 及 §4.10。保留此次初版选择与纠正的事实，不将旧规则继续视为当前需求；D1–D6 未改变。
+- 首次 typecheck/npm test 在新增测试的异步 mock 参数处报 TS7006；生产源码编译成功，但测试未运行。补上泛型 `Command<T>` 参数标注后 143 项通过；随后补充输入流错误测试和帮助六种创建语法，最终 144 项通过。未跳过旧测试；smoke 保留启动/退出/空 stderr 断言，并适配新提示符及显式 EOF 输入。
+- 实际 npm 启动脚本管道验证覆盖嵌套图形、颜色、move/undo/redo/tree/show/help、未实现 save、非法目标后继续编辑，退出码 0。第一次通过 PowerShell 管道传临时 JS 源码使中文源码变为问号；改用 ASCII 源码中的 Unicode 转义生成 UTF-8 输入后，npm start 的中文和特殊字符往返验证通过，未修改系统编码配置。该问题属于验证脚本转发，不宣称为 CLI 中文逻辑缺陷。
+
+**【人工填写】[已填写]** 请记录本人对词法规则、单映射绑定渲染回调、逐行 await 和实际终端反馈的理解；如有真实分歧再记录，不虚构经历。个人反思：本轮主要理解了 CLI 如何将用户输入转换为具体命令，并与已有 Commands 和 Model 模块衔接。
+
+对于 CLI 的职责划分，我认可将输入循环、词法解析、命令分发和结果渲染拆分为四个类。Parser 只负责拆分参数，Dispatcher 负责构造命令和绑定格式化回调，REPL 负责顺序执行，Renderer 只负责结果展示。这种设计避免了输入解析、业务执行和输出格式相互耦合。
+
+对于 Dispatcher 同时绑定命令构造和渲染回调的设计，我认为能够让 Renderer 不必再次根据命令名称选择处理逻辑，避免出现额外的名称分派。图形类型仍由 ShapeFactory 统一处理，符合此前确认的架构方案。
+
+对于逐行 await，我理解其意义不仅是保证终端输出顺序，还在于遵守 PR04 单会话执行器拒绝重叠调用的约定，避免多个命令同时修改会话状态。
+
+本轮一个重要的人工纠偏是注释规则。初版 AI 提示词加入了行尾注释处理，但我对照任务书后发现这是额外扩展，因此要求恢复为仅识别独立整行注释。这个过程使我认识到，AI 生成的方案即使在技术上合理，也不一定符合具体需求，仍需由开发者进行核对。
+
+### 2.9 PR05 注释规则人工纠偏（2026-10-30）
+
+在 `feat/CLI-001-interactive-editor` 根据用户明确审核意见，删除 AI 提示词扩展的行尾注释行为。保留已有未提交的 PR05 工作，仅修改 Parser、三份 CLI 测试、根 README、架构规则与本报告；未修改原任务书、模型或命令系统。案例按 §2.2 原有格式追加，保留案例 001 和全部已有人工字段。PR 待创建、commit 待创建；本轮未执行暂存、提交、推送或合并。
+
+### 2.10 PR05 create HEX 颜色补漏（2026-10-31）
+
+在 `feat/CLI-001-interactive-editor` 根据用户人工测试发现的 `#12/#zi/#中文` 漏洞，补充 ShapeFactory.create 对可选 fill/stroke 的 HEX 校验；此前仅验证字符串，合法参数数量不能排除非法颜色。本轮修改 ShapeFactory.ts、factory/cli-dispatcher/cli-integration 三份测试及三份文档；保留现有未提交工作、原任务书与已填人工结论。验收关注 3/4/6/8 位 HEX、大小写、引号/空白与失败原子性；未新增抽象或第三处分派，未扩展 set、XML 导入或通用 CSS 校验。用户明确提出修正规则，本轮未发生自动测试失败；PR 待创建、commit 待创建，未暂存/提交/推送/合并。
+
 ## 3. 一致性自查
+
+2026-10-31 补漏自查：相较 10-30 的“模型未修改”，现仅修改 `src/model/ShapeFactory.ts` 中 create 可选样式校验；利用既有定义定位颜色，不增加 CLI 类型分支，依赖方向和 D1–D6 不变。旧一致性表是当时记录，本次变更与新测试证据见 §2.10/§4.11。
+
+PR05 注释纠偏自查：仅去除前导空白后以 # 开头的独立整行被忽略；命令中的 # 是普通参数，与任务书和 architecture.md §1.2/§15.2 一致。无模块、依赖方向、公共接口或 D1–D6 变化；非法多余参数继续由原分发/工厂校验并保持失败原子性。
+
+### PR 05 一致性检查（2026-10-30）
+
+| 项目 | 结果 | 依据与限制 |
+|---|---|---|
+| 模块边界 | 通过（源码） | CLI 只经 CommandExecutor 执行，不访问 Session 活文档、不维护历史、不读写文件；model/commands/io 无 diff |
+| 类与依赖 | 通过（TypeScript AST + DFS） | 41 个源 TS 文件、35 个类，类名与文件名一致、无循环；四个 CLI 类仅依赖本目录、commands、model 及 Node readline/stream |
+| 两处名称分派 | 通过（静态检查/源码审阅） | Dispatcher 集中 19 种名称的构造/历史/格式路由，ShapeFactory 未改；CLI 没有 switch、图形类型分支或 Command instanceof 链 |
+| 与 PR02/PR04 的关系 | 已登记 | 四类职责与方向保持；注释已按人工意见恢复任务书规则，修订记录在 architecture.md §15.2，Session/Executor/History 公共接口与状态协议未修改 |
+| 范围与配置 | 通过（diff） | 只修改 CLI、入口、启动脚本、测试与三份文档；无新依赖，Read/Save 留待 PR06；旧 smoke 改为新入口的 EOF 验证 |
+
+**【人工核对】[已核验]** 抽查 Dispatcher 的 Map/命令构造与格式闭包、REPL await 及 Renderer 的只读结果使用，核对本报告 §1 与 architecture.md §15。结论：合 PR05 实际实现说明与 architecture.md §15，对 CLI 四个核心类的职责和调用关系进行了核对。
+
+CliRepl 负责交互循环，CommandParser 负责词法拆分，CommandDispatcher 负责命令构造和执行路由，CliRenderer 负责结果展示。程序入口只创建一组 EditorSession 和 CommandExecutor，并由 REPL 逐条 await 执行，符合 PR04 的会话执行约定。
+
+命令名称分派集中在 Dispatcher，图形类型名称分派仍由 ShapeFactory 负责。CLI 没有重新实现图形业务、撤销重做或真实文件读写。
+
+此外，重点检查了 Dispatcher 的命令构造与格式回调绑定、REPL 的顺序 await 和 Renderer 对结构化结果的使用。​
+认可 Dispatcher 使用集中映射构造命令，并为对应结果绑定格式化回调的方案。Renderer 只负责排版，不再次根据命令名称分派业务逻辑，也不访问或修改 Document 和 History。​
+词法处理方面，确认采用独立整行注释规则；双引号用于包裹完整参数，不提供转义语法；通过 quoted 标记保留引号信息，以避免文本参数与关键字发生歧义。
+
 
 根 README 同步自查：入口说明区分已实现的模型/命令 API、尚未接入的 CLI 和仅有接口的 IO；PR04 人工验收状态引用本报告，不将验收解释为已提交或已合并。无模块或依赖变化。
 
@@ -406,13 +510,13 @@ PR 01：业务架构与模块依赖关系暂不适用，待后续实现。检查
 
 | 场景 | 状态 | 测试位置 / 手工操作证据 |
 |---|---|---|
-| 六种图形类型 | [未验证] | |
-| create / delete / move / scale / set | [未验证] | |
-| group / ungroup / addto / front / back | [未验证] | |
-| undo / redo 和 IO 后禁止规则 | [未验证] | |
-| read / save SVG 回读 | [未验证] | |
-| 唯一 id、错误原子性和非法参数 | [未验证] | |
-| tree / show / help 与 REPL | [未验证] | |
+| 六种图形类型 | [已自动验证] | 模型/工厂测试与 cli-dispatcher、cli-integration 的六类创建 |
+| create / delete / move / scale / set | [已自动验证] | commands、cli-dispatcher 的真实编辑及 Undo/Redo；cli-integration 连续输入 |
+| group / ungroup / addto / front / back | [已自动验证] | document/commands 的 D3 与树不变量，CLI 的顺序/父关系断言 |
+| undo / redo 和 IO 后禁止规则 | [部分验证] | 完整快照与 init/canvas 边界已测；read/save 边界留待 PR06 |
+| read / save SVG 回读 | [待实现 / 未验证] | 仅 SvgStore 接口与 CLI 未实现提示，无真实文件验收 |
+| 唯一 id、错误原子性和非法参数 | [已自动验证] | 模型/命令故障注入、CLI 非法输入后的文档/路径/历史保持 |
+| tree / show / help 与 REPL | [已自动验证，人工体验待核验] | cli-renderer 精确排版断言、REPL 与编译入口的顺序/EOF/恢复测试 |
 
 ### 4.3 遗留风险与最终人工验收
 
@@ -485,6 +589,55 @@ PR 01：业务架构与模块依赖关系暂不适用，待后续实现。检查
 
 本轮仅修改文档；检查根 README 与本报告的进度一致性、两份文档的本地相对链接和 `git diff --check`。未运行 npm 构建、类型检查或测试；根 README 的 89/49 项结果引用 §4.6 既有记录，不作为本轮重跑结果。
 
+### 4.9 PR 05 实际验证记录（2026-10-30）
+
+| 实际命令/检查 | 结果 | 范围与限制 |
+|---|---|---|
+| 首次 `npm.cmd run typecheck` / `npm.cmd test` | 失败，退出码 1 | 新增 cli-integration.test.ts 的 mock 参数 TS7006；生产源码构建成功，测试断言尚未运行 |
+| 修正后的 `npm.cmd test` | 最终通过，144 pass / 0 fail，退出码 0 | 含 `npm run build` 和测试编译；既有 89 项继续运行（smoke 适配交互入口），新增 55 项 |
+| 最终 `npm.cmd run typecheck` | 通过，退出码 0 | 源码与测试均检查 |
+| `node --test --test-reporter=spec dist/tests/tests/cli-parser.test.js dist/tests/tests/cli-dispatcher.test.js dist/tests/tests/cli-renderer.test.js dist/tests/tests/cli-integration.test.js` | 55 pass / 0 fail，退出码 0 | 独立运行全部 PR05 专项 |
+| `npm.cmd run cli` / `npm.cmd start`（Node spawnSync 管道，超时 15s/10s） | 通过，均退出码 0 | 前者实际完成构建与启动；后者验证中文与特殊字符 UTF-8 往返、编辑与历史；save 和缺失目标正确报错且继续 |
+| 临时 Node + TypeScript AST/依赖 DFS、静态扫描 | 通过 | 41 源文件/35 类，无类文件名错误、跨层违规或环；CLI 没有 switch、console/process/fs、文档访问或私有控制器调用 |
+| 受保护路径 diff | 无输出 | model/commands/io、锁文件、tsconfig、AGENTS 和任务书未修改 |
+| `git diff --check`、新增源码/测试空白、文档相对链接与 UML 块起止检查 | 通过 | LF/CRLF 提示是 Git 换行转换提醒；没有新增空白错误；三份文档本地链接存在、UML 块配对，不代表渲染通过；已检查最终 diff |
+
+新增测试明细：
+
+- `tests/cli-parser.test.ts`：22 项。普通参数、空格/Tab、空字符串、中文与 SVG 字符、引号内 #、颜色、命令内 # 和其后 token 保留、反斜杠字面值、独立整行注释、quoted 元数据/冻结、未闭合或粘连引号、NUL/换行/ESC 控制字符拒绝及后续解析恢复。初版曾验证行尾截断，现已按人工意见改为保留，见 §4.10。
+- `tests/cli-dispatcher.test.ts`：16 项。十种编辑逐个验证真实文档修改并 Undo/Redo 精确恢复；Init 0/1/2 尺寸、Canvas 查询/边界、Tree/Show/Help 保留 Redo、六种创建、文本 in/数字字符串保留、严格数值转换、非法参数/未知命令/重复 id 与结构错误不改文档路径和历史、Read/Save 未实现。
+- `tests/cli-renderer.test.ts`：6 项。全文档树线及内联几何/显式样式、指定子树、show 父节点和中文文本、不补默认样式、结果/警告、注入帮助、单行且不重复的 error 前缀。
+- `tests/cli-integration.test.ts`：初版 11 项；本次注释纠偏后为 12 项。真实 REPL + Executor/Session/Model，验证 init/create/move/show、Undo/Redo/查询、嵌套 group/ungroup 顺序、删除子树再撤销、Canvas 边界和解封、错误后继续、全部六类/组合操作；延迟执行器 gate 验证缓冲行严格顺序及 EOF 等待，空 EOF、输入流异常可捕获、已编译子进程 CRLF/中文/末行无换行与退出。新增独立注释行、命令内 # 保留、颜色/文本及失败不入历史的回归场景。
+
+测试不只检查关键词：同时断言图形坐标/属性、树成员与顺序、父节点、尺寸、完整中立节点快照、Undo/Redo 数量和 blocked；非法分发用例之后仍可 Redo。延迟用例使用 3s 测试超时，子进程使用 5s/10s/15s 超时，不留长期交互等待。
+
+未验证/未实现：真实 SVG 文件 IO、Read/Save、文件回读与缺 id 警告、UML 渲染、覆盖率、lint、性能与历史限额、Linux/macOS 实机、人工终端布局/键盘操作。当前逐行 readline 不包含高级行编辑、补全或新增退出命令。§4.2 已按本轮证据更新，并明确区分已测 CLI 与未测 IO，不冒充文件验收或最终签收。
+
+### 4.10 PR05 注释规则纠偏验证（2026-10-30）
+
+| 实际命令/检查 | 实际结果 | 验证内容 |
+|---|---|---|
+| `npm.cmd test`（含构建与测试编译） | 145 pass / 0 fail，退出码 0 | 全量回归；原 §4.9 的 144 项基础上增加一个集成场景 |
+| `npm.cmd run typecheck` | 通过，退出码 0 | 源码与测试类型检查 |
+| `node --test --test-reporter=spec dist/tests/tests/cli-parser.test.js dist/tests/tests/cli-dispatcher.test.js dist/tests/tests/cli-renderer.test.js dist/tests/tests/cli-integration.test.js` | 56 pass / 0 fail，退出码 0 | Parser 22、Dispatcher 16、Renderer 6、集成 12 |
+
+当前规则验证：独立注释行（含前导空白）不执行；命令内独立 #、颜色和文本全部保留；`move r 10 20 # comment`、`show r # comment`、`canvas #` 等不能被截断后误执行，而是按既有参数规则报错。集成场景同时断言原坐标、颜色、字面文本 #、Undo/Redo 数量，随后合法命令仍能继续；分发失败用例比较完整文档和历史状态，并继续 Redo。
+
+本轮未新增架构层、依赖或配置；没有改动任务书、模型/命令接口及已有人工结论。文档规则已同步根 README、本报告 §1/§3 与 architecture.md §15.2，案例追加在 §2.2 原案例后；§4.9 的初版运行结果作为历史保留，当前测试数以本节为准。文档本地链接、改动源码/测试空白与 `git diff --check` 均通过；规则扫描仅保留旧行为的纠错记录及负向测试，没有现行行尾注释支持分支。没有重跑真实文件 IO、Linux/macOS 实机或人工交互体验，也未运行 UML 渲染、性能、lint 或覆盖率。
+
+### 4.11 PR05 create HEX 颜色校验验证（2026-10-31）
+
+| 实际命令/检查 | 实际结果 | 范围与限制 |
+|---|---|---|
+| `npm.cmd test`（含构建与测试编译） | 155 pass / 0 fail，退出码 0 | 比 §4.10 增加 10 项：工厂 8 项、分发 1 项、集成 1 项 |
+| `npm.cmd run typecheck` | 通过，退出码 0 | 源码与测试 |
+| `node --test --test-reporter=spec dist/tests/tests/cli-parser.test.js dist/tests/tests/cli-dispatcher.test.js dist/tests/tests/cli-renderer.test.js dist/tests/tests/cli-integration.test.js` | 58 pass / 0 fail，退出码 0 | Parser 22、Dispatcher 17、Renderer 6、集成 13 |
+| `node --test --test-reporter=spec dist/tests/tests/factory.test.js` | 19 pass / 0 fail，退出码 0 | 覆盖 rect/circle/ellipse 的 fill、line 的 stroke；合法及非法 HEX、普通颜色名、未设置样式 |
+
+新增测试验证单独 #、错误位数、非十六进制字符、中文、重复 #、引号/两端空白和包含额外文字的 # 颜色被拒绝；3/4/6/8 位合法 HEX 与字母大小写被接受，文本/ID 的 # 不被误判。分发测试分别从有 Redo 与 blocked 状态执行失败创建，比较完整文档、索引/父位置、路径、历史状态并检查目标 ID 不存在，原 Redo 仍能恢复。集成测试确认错误后可继续创建合法颜色及 # 文本，只有成功编辑进入历史。
+
+本次仅新增 create 的 # 颜色校验，不宣称提供通用 CSS 颜色校验或验证真实 SVG 文件。首次注释纠偏的 145/56 项结果保留在 §4.10，当前结果以本节为准。本轮文档链接、改动源码/测试空白、TypeScript AST 依赖/类名（41 源文件、35 类，无环）及 `git diff --check` 均通过；未重跑人工终端、真实 IO、UML 渲染、lint、覆盖率或性能测试。已有人工结论与反思原文保留；新增规则只作为带日期的待核验/待填写补充，不能视作已经由本人验收。
+
 ## 5. 本次会话待人工处理清单
 
 > AI 每次开发会话结束时更新这里，只保留当前仍未处理的问题；已解决事项迁移到相应章节的审查结论或记录中。不得替用户填“已审核”。
@@ -494,14 +647,25 @@ PR 01：业务架构与模块依赖关系暂不适用，待后续实现。检查
 - [ ] **【人工核对】[已核验]** 对照 `package.json`、两份 tsconfig、`src/main.ts` 和 `tests/smoke.test.ts`，复核第 1 节工程基线、第 3 节一致性自查，确认目录创建没有被误写为完成业务架构。[判断]没有被误写为完成业务架构
 - [ ] **【人工核对】[已核验]** 在本机用 `npm.cmd run build`、`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd start` 复现第 4.1 节结果，确认启动输出和 1 项测试；第 4.3 节保留个人验收结论。[判断]复现成功，确认启动输出和测试没问题。
 - [ ] **【人工填写】[已填写]** 在第 2.2 节按真实经历填写个人判断与收获；没有实际分歧时如实注明，不补写不存在的讨论。第 4.3 节填写本人观察、质量评价及签收信息；架构相关字段待 PR 02 设计后填写。[判断]
+
 - [ ] **【人工决策】[已填写]** 在 `doc/architecture.md` §12 D1–D6（进入 PR 03 前）逐项填写：快照历史 / 普通 g 样式 / 跨父分组 / 默认保存路径 / 外部 SVG 和 transform 范围 / 模块及树写入协议。每项已提供推荐理由与备选；将批准结论同步本报告 PR 02 架构小节。
 - [ ] **【人工核对】[已核验]** 在 `doc/architecture.md` §12 核对任务书限制、两处分派及三图，建议用跨父 group 和子节点显式 fill 两个例子检验 D2/D3；本报告 §3.3 填写结论。使用 PlantUML 预览工具检查三图语法/布局，本轮尚未渲染。
 - [ ] **【人工核对】[已核验]** 核验本报告 §2.3 的分支与 PR #1 合并事实、§4.4 的自动检查结果；可用 git log 和 npm 三条命令复现，确认只有两份文档改动。人工核验结果仍待本人填写。
 - [ ] **【人工填写】[已填写]** 在本报告 §2.2/§2.3 补充对架构取舍的真实判断和反思；在 architecture.md §12 填写本人接受或调整的理由。§4.3 最终验收字段继续保留
+
 - [ ] **【人工核对】[已核验]** PR03：对照本报告 §1 PR03 实现图、§3 PR03 自查及 architecture.md §13，抽查 `Group.ts` 的冻结数组/withChildren/clone 和 `Document.ts` 的 transform/commit；确认结构操作后按 id 重定位可接受，并确认没有实现 CLI/Commands/IO。
 - [ ] **【人工核对】[已核验]** PR03：运行 `npm.cmd run typecheck`、`npm.cmd test`，复现 §4.5 的 40 项通过；特别查看 document.test 的 D3 嵌套跨父用例、shapes.test 的溢出用例和 factory.test 的循环输入用例。
 - [ ] **【人工填写】[已填写]** PR03：在 §2.4 填写本人对结构封装、深副本及失败原子性的真实反思；本轮验收意见与是否提交由本人决定，不代填通过或执行 commit。
+
 - [ ] **【人工核对】[已核验]** PR04：在本报告 §1/§3 PR04 字段及 architecture.md §14 填写结论；抽查 Executor 的准备/单次提交、Session 的副本访问/一次绑定、History 的完整快照与 blocked，确认不按命令名分派且没有 CLI/真实 IO。
 - [ ] **【人工核对】[已核验]** PR04：运行 typecheck、npm test 及 §4.6 的专项命令，复现 89/49 项通过；重点查看四个克隆阶段故障、候选校验故障、边界后重新编辑和异步重叠拒绝用例。UML 实际图尚未渲染，可用预览工具核对布局/语法。
 - [ ] **【人工填写】[已填写]** PR04：在 §2.5 记录真实反思与测试观察，确认每 Session 一个 Executor/逐次 await 的调用约定；个人验收与提交决定保留给本人，不代填或执行暂存、提交、推送。
 - [ ] **【人工核对】[已核验]** 测试说明补充：对照三份测试源码抽查 `tests/doc/PR4_test.md`，尤其是第 28～29 项历史边界、第 37～40 项克隆阶段与第 48 项异步重叠限制；确认说明符合本人理解，不代填已核验。
+
+
+- [ ] **【人工核对】[已核验]** PR05：在本报告 §1/§3 及 architecture.md §15 核对四类职责、真实图、两处分派与逐行 await；特别确认仅独立整行注释、引号无转义及 quoted in 规则。结论填写在对应字段。2026-10-31 的 create HEX 补充校验另见本节新增待核验项，原已核验状态不代表新规则已验收。
+- [ ] **【人工核对】[已核验]** PR05：运行 `npm.cmd run cli`，用根 README 的命令示例观察提示符、中文、颜色、树/属性/帮助、错误后继续与 EOF；复现 §4.10 的 145/56 项测试。核对终端排版和键盘退出是否符合本人环境；验收意见:正确运行，能正确执行合法命令，提示并拒绝非法命令，有正确的undo/redo逻辑。
+- [ ] **【人工核对】[已核验]** 注释规则纠偏：核对 §2.2 案例 002 是否准确记录两次人工发现和修正：独立整行注释，以及 create 可选颜色的 # 值须符合 3/4/6/8 位 HEX；普通文本/ID 不受颜色校验影响。检查 §4.10/§4.11 回归证据。案例核对结论：首次修正时，。
+- [ ] **【人工填写】[已填写]** PR05：在 §2.8 填写真实反思与取舍，在 architecture.md §15 填写核对结论；本次提交/创建 PR 决定由本人作出，不代填，不自动执行。
+- [ ] **【人工核对补充（2026-10-31）】[已核验]** PR05 create HEX：在 §1/§3 和 architecture.md §15 的补充字段中确认 `#12/#zi/#中文` 被拒绝，合法 3/4/6/8 位 HEX 被接受，加引号不能绕过；失败不创建图形、不清空 Redo、不解除 blocked，文本/ID 的 # 不受影响。复现 §4.11 的全量 155 项与 CLI 58 项结果；补充验收意见：[已填写]。
+- [ ] **【人工填写补充（2026-10-31）】[已填写]** 在 §2.8 的补充反思中记录此次发现颜色语义漏检的实际观察；确认 §2.2 案例 002 合并两次发现的叙述准确，保留原反思及已核验结论。

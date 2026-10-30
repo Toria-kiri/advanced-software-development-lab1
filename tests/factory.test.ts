@@ -41,6 +41,25 @@ test("factory accepts decimal/exponent tokens without adding default styles", ()
   assert.deepEqual(shape.toSvgNode().attributes, { id: "r", x: -0.5, y: 2, width: 30, height: 0 });
 });
 
+for (const [type, params, attribute] of [
+  ["rect", [0, 0, 1, 2], "fill"], ["circle", [1, 2, 3], "fill"],
+  ["ellipse", [1, 2, 3, 4], "fill"], ["line", [0, 0, 1, 2], "stroke"],
+] as const) {
+  test(`factory create ${type} accepts valid hex colors and preserves named colors`, () => {
+    for (const color of ["#aBc", "#aBcD", "#12aBcD", "#12aBcD80", "red", "none"]) {
+      const shape = factory.create(type, "id", [...params, color]);
+      assert.equal(shape.getAttribute(attribute), color);
+    }
+    assert.equal(factory.create(type, "id", [...params, " #aBc "]).getAttribute(attribute), " #aBc ");
+    assert.equal(factory.create(type, "id", params).getAttribute(attribute), undefined);
+  });
+  test(`factory create ${type} rejects invalid hash colors including quoted whitespace`, () => {
+    for (const color of ["#", "#1", "#12", "#12345", "#1234567", "#123456789", "#zi", "#中文", "#ggg", "##abc", "#abc comment", " #12 "]) {
+      assert.throws(() => factory.create(type, "id", [...params, color]), { message: `error: invalid hex color: ${color}` });
+    }
+  });
+}
+
 test("neutral nested SVG adapter preserves raw text, order and group-level styles", () => {
   const node: SvgNode = { tag: "g", attributes: { id: "g", fill: "blue", "stroke-width": "2" }, children: [
     { tag: "text", attributes: { id: "t", x: "1", y: "2", fill: "red" }, children: [], text: "<中文>&" },

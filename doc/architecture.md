@@ -461,3 +461,96 @@ Session 原子提交：Document、readPath 和 CommandHistory 统一保存在 Se
 故障注入测试：tests/command-atomicity.test.ts 覆盖候选执行异常、校验失败、克隆失败、历史准备失败、结果准备失败、Undo/Redo 恢复异常以及重叠调用等情况。测试重点检查失败后正式文档、历史状态和路径是否保持一致。
 
 历史边界测试：tests/command-history.test.ts 覆盖 Undo/Redo、Redo 保留、init/canvas 历史边界、查询不影响历史、失败编辑不解除 blocked，以及历史快照独立性等行为。。
+
+## 15. PR 05 CLI 实际架构（2026-10-30）
+
+本节描述已实现的 CLI 集成；§3/§4/§7 的目标图和 §12 D1–D6 人工结论保留。PR04 命令、Session 原子提交与 History 未修改；2026-10-31 按用户审核补充 ShapeFactory.create 的 HEX 颜色校验，其余 PR03 模型保持不变。真实 Read/Save 和 XML/磁盘功能仍未实现。
+
+### 15.1 组件、接口与依赖
+
+| 文件 | 实际接口与责任 |
+|---|---|
+| `src/cli/CommandParser.ts` | `tokenize(line)` 返回冻结的 `{value, quoted}` token；只做词法处理，quoted 用于区别文本 `"in"` 与 create 的结构关键字 |
+| `src/cli/CommandDispatcher.ts` | `create(tokens)` 返回 CliAction；集中管理 19 个命令名、参数数量、构造/历史路由与结果格式回调；`helpEntries()` 从同一映射生成只读帮助 |
+| `src/cli/CliRenderer.ts` | `render(result, format)` 复制后结果的排版入口；tree/show/help/canvas/shape/error 方法无模型写入；不按命令名或图形类型 switch |
+| `src/cli/CliRepl.ts` | `run(input, output, errors)` 用 Node readline 异步迭代逐行 await，空行/注释跳过，单行错误输出后继续，EOF 处理完已缓冲行后退出 |
+| `src/main.ts` | 创建唯一 Session/Executor，注入 Parser/Dispatcher/Renderer/REPL，连接 stdin/stdout/stderr；处理 run 的顶层异常并设置退出码 1 |
+
+CliAction 是 CLI 内部含 execute 方法的接口记录，不是新的编辑 Command 或调度框架。其闭包持有现有 Command 与格式回调：普通命令调用 `executor.execute(command)`，Undo/Redo 直接调用执行器入口。REPL 对动作没有具体命令名知识，Renderer 无第二套结果名映射。因此名称到实现的分派仍只有 Dispatcher 和 ShapeFactory 两处，保留为后续插件化重构点。
+
+```plantuml
+@startuml
+title PR05 实际 CLI 集成（真实 SVG IO 待实现）
+component "main.ts" as Main
+package "src/cli" {
+  class CliRepl
+  class CommandParser
+  class CommandDispatcher
+  class CliRenderer
+  interface CliAction
+  CliRepl --> CommandParser : tokenize
+  CliRepl --> CommandDispatcher : create
+  CliRepl --> CliAction : await execute
+  CliRepl --> CliRenderer : error
+  CommandDispatcher ..> CliAction : 构造命令及格式闭包
+  CommandDispatcher --> CliRenderer : 格式回调
+}
+package "src/commands（PR04 未改）" {
+  class EditorSession
+  class CommandExecutor
+  interface Command
+  class CommandResult
+  class CommandHistory
+}
+package "src/model（PR03 模型，create 颜色校验已补充）" {
+  class Document
+  interface ShapeDescription
+  class ModelValue
+  class ModelError
+}
+Main --> CliRepl
+Main --> EditorSession
+Main --> CommandExecutor
+CliRepl --> CommandExecutor : 注入同一执行器
+CommandDispatcher --> Command : 构造具体命令
+CliAction --> CommandExecutor : execute / undo / redo
+CliRenderer --> CommandResult
+CliRenderer --> ShapeDescription : 只读排版
+CommandDispatcher --> ModelValue : 通用数值验证
+CommandParser --> ModelError
+CommandExecutor --> EditorSession : PR04 控制器协议
+EditorSession --> CommandHistory : 原子状态持有
+EditorSession --> Document
+CommandExecutor --> Document : 候选隔离（未改）
+@enduml
+```
+
+CLI 仅依赖本目录、commands、model 的只读描述/通用验证与错误类型，以及 Node readline/stream；不依赖 io、fs，不保留活 Shape，不直接访问 Session 文档。`create` 的类型专属数量、几何和可选样式由现有 ShapeFactory 校验，`set` 值交既有模型白名单转换；move/scale/init/canvas 的数值通过 ModelValue 严格转换，不使用 parseFloat 截断或 Number 的宽松空串/十六进制转换。没有新增第三方依赖或修改 tsconfig。
+
+### 15.2 词法规则与对原草案的修订
+
+以任务书的整行注释规则为准。PR05 初版曾按 AI 生成的提示词加入行尾注释；经用户对照任务书人工审核，该扩展要求已删除，代码及测试已纠正。当前规则如下，其他未明确的引号细节仍属于 CLI 实现约定：
+
+- 去除前导空白后以 `#` 开头的整行都是注释，包括 `#comment`。
+- 不支持行尾注释。命令行中的 `#` 无特殊注释含义，`#4a90d9`、`A#B`、`#tag`、独立 `#` 都保留为普通参数；例如 `show r1 # comment` 因参数过多报错，不会悄悄执行 show。
+- 2026-10-31 人工补充：create 的可选 fill/stroke 参数若去除两端空白后以 # 开头，必须符合 3/4/6/8 位 HEX（RGB/RGBA）格式，字符限 0–9/a–f/A–F；否则报 `error: invalid hex color: ...`。普通颜色名不受此项限制，ID 与 text 内容中的 # 不作为颜色校验。
+- 双引号包裹完整 token，允许空串、中文、SVG 特殊字符和 `#`；反斜杠为普通字符，不支持 shell 插值、转义双引号或转义换行。不支持单引号分组。未闭合引号、引号粘连或控制字符报单行 error。
+- create 仅识别参数区未加引号的 `in`，要求单个尾缀 `in <containerId>`；作为文本/样式的 `in` 应加双引号，避免歧义。类型专属语法仍由 Factory 决定。
+
+注释处理现与 §1.2 “只有注释行开头的 #”一致；此纠偏未更改 D1–D6、模块依赖或 Command 接口。引号元数据仍用于区别结构关键字与文本。所有名称大小写敏感，不新增 exit/quit；EOF 退出。Init 直接沿用构造器默认值，0/1/2 个尺寸参数分别对应默认、宽度加默认高度、指定宽高；Canvas 只允许 0 或 2 个参数。
+
+HEX 校验落在 ShapeFactory.create 已有 optionalStyle 分支，复用既有类型定义定位 fill/stroke，不在 CLI 按图形类型分派。CreateCommand 调用工厂后才 insert，工厂拒绝非法颜色时执行器不提交候选，路径、历史和 blocked 保持。此次仅完善 create 的 # 颜色参数，不扩展成通用 CSS 颜色校验，也未更改 set 或 fromSvgNode 的行为。
+
+### 15.3 调用与结果呈现
+
+`move r1 30 20` → REPL → Parser tokens → Dispatcher 严格数字转换/构造 MoveCommand/选择格式回调 → 同一 Executor.execute → PR04 候选与快照事务 → CommandResult → Renderer 排版 → stdout。失败在 REPL 转成一行 stderr；不会终止后续合法命令。查询同样走 Executor；Undo/Redo 不构造普通编辑命令，因此不新增历史单元。
+
+Tree 用结果自带的 ShapeDescription.summary、显式样式和 children 显示 Unicode 树线；show 使用 attributes、text、parentId 显示属性，根父显示 svg；help 展示全部 19 种命令语法和六种 create 形式，Read/Save 明确标未实现。成功反馈是简洁摘要；Undo/Redo 的既有结果只含命令名，因此输出 `undid move` / `redid move`，不额外读取文档伪造坐标反馈。组级几何反馈也不虚构组自身坐标。
+
+输出使用注入的 Writable，正常反馈/提示符在 stdout，错误在 stderr；使用 terminal=false 的 readline 逐行模式，不提供终端行编辑或历史补全框架。终端完整交互外观需人工验证；自动测试覆盖流输入及已编译子进程，未运行 Linux/macOS 实机、性能、覆盖率或本节 UML 渲染。读写错误与文件回读仍属 PR06。
+
+**【人工核对】[已核验]** 核对四类与图的实际依赖、Dispatcher 绑定渲染回调而非新增名称分派、注释/引号规则以及 EOF 退出方式；运行 `npm.cmd run cli`，用中文文本、颜色、嵌套 group 和 Undo/Redo 观察反馈。结论：对照 PR05 实际调用流程，确认用户输入依次经过 REPL、Parser、Dispatcher、CommandExecutor 和 Renderer。普通编辑由 Executor.execute 执行，Undo/Redo 使用原有历史入口，不作为新的编辑记录。
+
+认可 Dispatcher 绑定渲染回调的设计，Renderer 不新增命令名称分派。词法规则采用独立整行注释、双引号完整参数和 quoted 标记。正常结束通过 EOF 实现，不额外增加正式退出命令。
+
+核对结论： 当前 CLI 设计与既有 Commands、Model 模块能够保持清晰的职责边界。终端显示和键盘 EOF 行为仍以本地实际运行观察为最终依据，真实 SVG IO 留待 PR06。
