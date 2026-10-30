@@ -1,0 +1,21 @@
+# 在仓库根目录启动 CLI 后逐行回放；末尾 save 会覆盖 examples/phase1.svg
+init 800 600
+create rect background 0 0 800 600 #ffffff
+create g scene
+set scene fill #4a90d9
+create g left in scene
+create rect start 60 100 180 80 in left
+create text start-label 80 145 "开始 <&> # Phase 1" in left
+set start-label fill white
+create g right in scene
+create circle end 530 140 50 #f5a623 in right
+create text end-label 505 145 "完成" in right
+set end-label fill black
+create ellipse marker 350 280 80 35 in scene
+create line edge 240 140 480 140 #333333 in scene
+set edge stroke-width 3
+back marker
+move right 0 20
+tree
+show edge
+save examples/phase1.svg

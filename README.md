@@ -2,7 +2,7 @@
 
 《高级软件开发技术》Lab1 Phase 1：基于 TypeScript 的命令行 SVG 编辑器。
 
-> **当前状态：PR 06 真实 SVG 读写与完整 CLI 集成已实现，待人工验收。** PR 05 已合并；现在可在终端编辑、保存、读取 SVG，并继续执行 Undo/Redo。支持范围及验证记录见 [课程报告](doc/README.md) 和 [架构 §16](doc/architecture.md#16-pr-06-svg-持久化与完整集成2026-10-31)。浏览器实际展示仍待人工核验。
+> **当前状态：Phase 1 最终交付版本，249 项测试通过；用户已授权提交、合并 PR07 并创建 `final` 标签。** 实际发布结果以 GitHub PR、远程 main 与 final 标签为准。可在终端编辑、保存、读取 SVG，并继续执行 Undo/Redo。需求覆盖、证据和交付限制见 [PR07 验收矩阵](tests/doc/PR7_acceptance.md)、[课程报告](doc/README.md) 和 [架构 §16](doc/architecture.md#16-pr-06-svg-持久化与完整集成2026-10-31)。用户已反馈 PR06 的 Edge 展示检查；PR07 新示例的浏览器观察尚未单独记录，不将发布授权冒充该项验证结果。
 
 ## 1. 项目目标
 
@@ -48,7 +48,7 @@ svg> save demo.svg
 | 操作历史 | `undo`、`redo` | CLI 复用完整快照、历史边界和失败原子性 |
 | 图形类型 | `rect`、`circle`、`ellipse`、`line`、`text`、`g` | 模型已实现 |
 
-当前全量 242 项测试通过，PR06 新增 87 项编解码、文件、历史和完整 CLI 测试，详见课程报告 §4.12。PR04 的 49 项测试说明仍见 [PR4_test.md](tests/doc/PR4_test.md)。
+当前全量 **249 项测试通过，0 失败、0 跳过**，覆盖及分文件统计见 [PR07 验收矩阵](tests/doc/PR7_acceptance.md)。PR06 的基线为 242 项，PR07 补充 7 项真实入口、资源阈值、恢复故障与示例可复现测试，详见课程报告 §4.13。PR04 的 49 项历史测试说明仍见 [PR4_test.md](tests/doc/PR4_test.md)。
 
 重要行为约定：
 
@@ -155,6 +155,8 @@ async function example() {
 
 同一 Session 绑定一个 Executor；每次操作必须 await 完成，重叠调用会报 `error: command executor is busy`。`session.requireDocument()` 返回独立副本，修改副本不影响会话。init、read、save 和修改 canvas 成功后建立历史边界；查询不影响历史。HelpCommand 接收外部提供的只读语法列表。ReadCommand/SaveCommand 接收 SvgStore 注入，实际磁盘实现为 SvgFileStore。
 
+可复现交付示例见 [examples/README.md](examples/README.md)，命令脚本为 `examples/phase1.cli`，实际 CLI 生成的 SVG 为 `examples/phase1.svg`。自动测试在临时目录重放脚本并与交付文件比较语义，不覆盖仓库中的示例。
+
 ## 5. 当前目录与职责
 
 以下为当前主要目录；整体架构与实际实现范围见 [architecture.md](doc/architecture.md)，命令、CLI 与 IO 实际架构分别见其 §14/§15/§16：
@@ -197,8 +199,8 @@ async function example() {
 | PR 03 | `feat/MODEL-001-shape-document` | 实现图形类、文档模型、层级与 ID 管理 |
 | PR 04 | `feat/CMD-001-command-execution` | Command、会话、编辑/查询命令及完整快照 Undo/Redo（已实现，课程报告已记录人工验收） |
 | PR 05 | `feat/CLI-001-interactive-editor` | REPL、解析、分发与结果呈现，接入模型和命令系统（已合并） |
-| PR 06 | `feat/IO-001-svg-persistence` | Read/Save、真实 SVG 读写与完整生命周期集成（已实现，待人工验收） |
-| 后续（编号待确认） | `test/QA-001-final-validation` | 完整 CLI/IO 集成、架构一致性自查与最终文档 |
+| PR 06 | `feat/IO-001-svg-persistence` | Read/Save、真实 SVG 读写与完整生命周期集成（已合并，保留人工核验记录） |
+| PR 07 | `test/QA-001-phase1-acceptance` | 需求追踪、真实 CLI/IO 验收、边界回归、示例与最终文档（待本轮人工签收） |
 
 **实施说明：** PR04 完成命令与历史，PR05 接入 CLI，PR06 完成真实文件读写及语义回读测试。原计划的编辑/结构/历史工作已提前落实；自动 XML/文件验证不代替人工浏览器显示验收，后续分支仍为建议。
 
