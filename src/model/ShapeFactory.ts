@@ -56,11 +56,11 @@ export class ShapeFactory {
   }
 
   /** Adapts already parsed nodes, not XML. Missing-id assignment belongs to IO. */
-  fromSvgNode(node: SvgNode): Shape {
-    return this.fromNode(node, new Set<SvgNode>());
+  fromSvgNode(node: SvgNode, defaultGeometry = false): Shape {
+    return this.fromNode(node, new Set<SvgNode>(), defaultGeometry);
   }
 
-  private fromNode(node: SvgNode, visiting: Set<SvgNode>): Shape {
+  private fromNode(node: SvgNode, visiting: Set<SvgNode>, defaultGeometry: boolean): Shape {
     if (visiting.has(node)) throw new ModelError("cyclic SVG node tree");
     visiting.add(node);
     const definition = this.definition(node.tag);
@@ -69,7 +69,7 @@ export class ShapeFactory {
       if (!allowed.has(name)) throw new ModelError(`unknown attribute: ${name}`);
     }
     const id = ModelValue.id(node.attributes.id);
-    const params: Parameter[] = definition.geometry.map(name => ModelValue.number(node.attributes[name], name));
+    const params: Parameter[] = definition.geometry.map(name => ModelValue.number(node.attributes[name] ?? (defaultGeometry ? 0 : undefined), name));
     if (definition.text) params.push(ModelValue.text(node.text ?? "", "text"));
     let shape = definition.build(id, params);
     for (const name of ["fill", "stroke", "stroke-width"] as const) {
@@ -77,7 +77,7 @@ export class ShapeFactory {
     }
     if (shape instanceof Group) {
       if (node.text !== undefined && node.text.trim() !== "") throw new ModelError("unexpected group text");
-      shape = shape.withChildren(node.children.map(child => this.fromNode(child, visiting)));
+      shape = shape.withChildren(node.children.map(child => this.fromNode(child, visiting, defaultGeometry)));
     } else {
       if (node.children.length !== 0) throw new ModelError(`not a container: ${id}`);
       if (!definition.text && node.text !== undefined && node.text.trim() !== "") {

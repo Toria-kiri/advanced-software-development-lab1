@@ -11,10 +11,15 @@ import { CommandExecutor } from "../src/commands/CommandExecutor";
 import { Command } from "../src/commands/Command";
 import { EditorSession } from "../src/commands/EditorSession";
 import { Group } from "../src/model/Group";
+import { ModelError } from "../src/model/ModelError";
 
 function fixture() {
   const session = new EditorSession(), executor = new CommandExecutor(session);
-  const repl = new CliRepl(executor, new CommandParser(), new CommandDispatcher(), new CliRenderer());
+  const dispatcher = new CommandDispatcher({
+    async read(path: string): Promise<never> { throw new ModelError(`cannot read file: ${path}`); },
+    async write(path: string): Promise<never> { throw new ModelError(`cannot write file: ${path}`); },
+  });
+  const repl = new CliRepl(executor, new CommandParser(), dispatcher, new CliRenderer());
   return { session, executor, repl };
 }
 async function runScript(text: string) {
@@ -65,7 +70,7 @@ test("REPL canvas modification blocks old history until a successful new edit", 
   assert.equal((f.stderr.match(/undo not allowed after io command/g) || []).length, 2);
   assert.match(f.stderr, /nothing to undo/);
 });
-test("REPL errors, malformed input, comments and unsupported IO do not stop later commands", async () => {
+test("REPL errors, malformed input, comments and failed IO do not stop later commands", async () => {
   const f = await runScript('#comment\n\nhelp\ninit\n# text on a separate comment line\ncreate text t 0 0 "A # B"\nset t text "unterminated\nunknown\ncreate text t 9 9 "duplicate"\nread no.svg\nsave out.svg\nset t text "中文 <&>"\n');
   assert.equal(f.session.requireDocument().size, 1);
   assert.equal(f.session.requireDocument().find("t").getAttribute("text"), "中文 <&>");

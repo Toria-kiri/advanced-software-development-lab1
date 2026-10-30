@@ -2,7 +2,7 @@
 
 《高级软件开发技术》Lab1 Phase 1：基于 TypeScript 的命令行 SVG 编辑器。
 
-> **当前状态：PR 05 CLI 已接入模型与命令系统，待人工验收。** PR 04 已合并；现在可通过终端连续创建、编辑、组织、查询图形并执行 Undo/Redo。真实 SVG 文件读写留待 PR06，`read`/`save` 明确报告尚未实现。实现与验证记录见 [课程报告](doc/README.md)。
+> **当前状态：PR 06 真实 SVG 读写与完整 CLI 集成已实现，待人工验收。** PR 05 已合并；现在可在终端编辑、保存、读取 SVG，并继续执行 Undo/Redo。支持范围及验证记录见 [课程报告](doc/README.md) 和 [架构 §16](doc/architecture.md#16-pr-06-svg-持久化与完整集成2026-10-31)。浏览器实际展示仍待人工核验。
 
 ## 1. 项目目标
 
@@ -12,7 +12,7 @@
 
 ### 目标交互示例
 
-以下为任务书中的**目标使用方式**，不表示当前版本已经支持：
+当前 CLI 已支持以下任务书示例中的命令：
 
 ```text
 svg> init 800 600
@@ -41,14 +41,14 @@ svg> save demo.svg
 
 | 类别 | 命令或能力 | 当前进度 |
 | --- | --- | --- |
-| 文档管理 | `init`、`read`、`save`、`canvas` | Init/Canvas 已接入 CLI；Read/Save 留待 PR06 |
+| 文档管理 | `init`、`read`、`save`、`canvas` | 已接入真实 SVG 文件读写及历史边界 |
 | 图形创建与编辑 | `create`、`delete`、`move`、`scale`、`set` | 已接入 CLI |
 | 分组与层级 | `group`、`ungroup`、`addto`、`front`、`back` | 已接入 CLI |
 | 信息查看 | `tree`、`show`、`help` | 已实现终端结构树、属性明细与命令语法帮助 |
 | 操作历史 | `undo`、`redo` | CLI 复用完整快照、历史边界和失败原子性 |
 | 图形类型 | `rect`、`circle`、`ellipse`、`line`、`text`、`g` | 模型已实现 |
 
-当前全量 155 项测试通过，包含 58 项 CLI 专项测试及既有回归测试，详见课程报告 §4.9～§4.11。PR04 的 49 项测试说明仍见 [PR4_test.md](tests/doc/PR4_test.md)。
+当前全量 242 项测试通过，PR06 新增 87 项编解码、文件、历史和完整 CLI 测试，详见课程报告 §4.12。PR04 的 49 项测试说明仍见 [PR4_test.md](tests/doc/PR4_test.md)。
 
 重要行为约定：
 
@@ -103,6 +103,12 @@ undo
 redo
 tree
 show r1
+save demo.svg
+read demo.svg
+move r1 1 2
+undo
+redo
+save
 help
 ```
 
@@ -110,7 +116,16 @@ help
 
 输入规则：命令名大小写敏感；空白分隔参数，双引号保留空格和 `#`，反斜杠按字面保留，不解释 shell 转义或 `\n`/`\"`。引号必须包裹整个参数，未闭合或与其他字符粘连会报错。**注释必须独立成行**：去除前导空白后以 `#` 开头的整行为注释，不支持行尾注释。命令中的 `#`、`#4a90d9`、`A#B`、`#tag` 均作为普通参数保留；例如 `show r1 # comment` 会因多余参数报错。create 的 `in <containerId>` 必须位于末尾，文本内容若为 `in` 应加双引号。错误写入 stderr，反馈和查询写入 stdout；失败后可继续输入。
 
-`init` 默认 800×600；只提供宽度时高度仍为 600。`canvas` 必须无参数或同时提供宽高。各图形参数和 `set` 白名单见任务书；`help` 包含六种图形的创建语法。当前 `read`/`save` 不访问文件，也不会输出保存成功提示。
+`init` 默认 800×600；只提供宽度时高度仍为 600。`canvas` 必须无参数或同时提供宽高。各图形参数和 `set` 白名单见任务书；`help` 包含六种图形的创建语法。上述示例会在当前目录生成并覆盖 `demo.svg`，可用浏览器打开；包含空格的文件路径使用英文双引号包裹。
+
+### SVG 文件与路径规则
+
+- `read <file.svg>` 可在 init 前使用；成功后设置读入路径，缺失 ID 按标签名加序号自动补齐并输出 warning，避开文件中所有显式 ID。
+- `save [file.svg]` 写出真实 UTF-8 SVG；无参数时只使用最近一次成功 read 的路径。显式 save-as 不改变默认读入路径，init 会清除路径；没有读入路径时需显式指定保存文件。
+- init、成功 read/save、修改 canvas 都清空并封锁旧历史，下一次成功编辑后解封。失败读写保留文档、路径及历史。
+- 支持六类图形、嵌套组、几何属性、显式 fill/stroke/stroke-width 和 Unicode 文本。根尺寸缺失时分别补 width=800、height=600；已提供的值必须为有限正数。几何缺省值补 0，数值允许无单位或 px；viewBox 只接受与画布一致的 `0 0 width height`。
+- 不支持 transform、非默认 viewBox、path/image/script/tspan、CSS style/样式表、额外视觉属性、外部绘制引用和 DTD/自定义实体，遇到时明确报错；不声称支持完整 SVG。
+- 输入/输出上限为 16 MiB，最多 100000 个图形、256 层；XML 特殊字符由 IO 层转义。保存采用同目录临时文件完整写入、sync/关闭、rename 替换；常规失败尝试清理临时文件，不先删除旧目标。文件系统与内存不共享事务，异常或进程中断下不能保证二者绝对同步，详见架构 §16。
 
 create 的可选 fill/stroke 颜色参数会检查 HEX 格式：去除两端空白后，以 `#` 开头的颜色须为 `#RGB`、`#RGBA`、`#RRGGBB` 或 `#RRGGBBAA`，每位仅允许 `0–9`、`a–f`、`A–F`。`#12`、`#zi`、`#中文` 和单独 `#` 均报 `error: invalid hex color: ...`，不创建图形、不改变历史；加双引号也不能绕过。普通颜色名仍可使用；ID 和文本内容中的 `#` 不属于颜色参数，不套用此校验。此项为人工验收补充规则，非任务书新增原文。
 
@@ -138,11 +153,11 @@ async function example() {
 }
 ```
 
-同一 Session 绑定一个 Executor；每次操作必须 await 完成，重叠调用会报 `error: command executor is busy`。`session.requireDocument()` 返回独立副本，修改副本不影响会话。init 和修改 canvas 会清空并封锁历史，下一次成功编辑后重新解禁；查询不影响历史。HelpCommand 接收外部提供的只读语法列表。ReadCommand/SaveCommand 尚未实现，`src/io/SvgStore.ts` 仅定义未来 IO 契约。
+同一 Session 绑定一个 Executor；每次操作必须 await 完成，重叠调用会报 `error: command executor is busy`。`session.requireDocument()` 返回独立副本，修改副本不影响会话。init、read、save 和修改 canvas 成功后建立历史边界；查询不影响历史。HelpCommand 接收外部提供的只读语法列表。ReadCommand/SaveCommand 接收 SvgStore 注入，实际磁盘实现为 SvgFileStore。
 
 ## 5. 当前目录与职责
 
-以下为当前主要目录；整体架构与实际实现范围见 [architecture.md](doc/architecture.md)，命令与 CLI 实际架构分别见其 §14/§15：
+以下为当前主要目录；整体架构与实际实现范围见 [architecture.md](doc/architecture.md)，命令、CLI 与 IO 实际架构分别见其 §14/§15/§16：
 
 ```text
 .
@@ -158,7 +173,7 @@ async function example() {
 │   ├── cli/                       # 已实现 REPL、词法解析、命令分发和结果呈现
 │   ├── commands/                  # 已实现命令、会话与完整快照历史
 │   ├── model/                     # 已实现文档与六类图形模型
-│   ├── io/                        # 仅 SvgStore 接口，实际读写待实现
+│   ├── io/                        # SvgStore、XML 解析/序列化及真实文件存储
 │   └── main.ts                    # 组装单 Session/Executor 并启动交互
 ├── tests/
 │   ├── *.test.ts                  # CLI、模型、命令、历史、原子性和启动测试
@@ -181,11 +196,11 @@ async function example() {
 | PR 02 | `docs/ARCH-001-design` | 明确模块职责、依赖方向、Command / Composite 设计 |
 | PR 03 | `feat/MODEL-001-shape-document` | 实现图形类、文档模型、层级与 ID 管理 |
 | PR 04 | `feat/CMD-001-command-execution` | Command、会话、编辑/查询命令及完整快照 Undo/Redo（已实现，课程报告已记录人工验收） |
-| PR 05 | `feat/CLI-001-interactive-editor` | REPL、解析、分发与结果呈现，接入模型和命令系统（本轮已实现，待人工验收） |
-| PR 06 | `feat/IO-001-svg-persistence` | 按 PR05 任务安排，后续实现 Read/Save 与真实 SVG 读写 |
+| PR 05 | `feat/CLI-001-interactive-editor` | REPL、解析、分发与结果呈现，接入模型和命令系统（已合并） |
+| PR 06 | `feat/IO-001-svg-persistence` | Read/Save、真实 SVG 读写与完整生命周期集成（已实现，待人工验收） |
 | 后续（编号待确认） | `test/QA-001-final-validation` | 完整 CLI/IO 集成、架构一致性自查与最终文档 |
 
-**实施说明：** 命令和完整快照历史已集中在 PR04 完成；PR05 接入真实 CLI，PR06 的 IO 安排以本轮任务说明为依据。原计划的编辑/结构/历史工作已提前落实，后续分支仍为建议，执行范围以具体任务为准；CLI 测试不代替 SVG 文件回读验收。
+**实施说明：** PR04 完成命令与历史，PR05 接入 CLI，PR06 完成真实文件读写及语义回读测试。原计划的编辑/结构/历史工作已提前落实；自动 XML/文件验证不代替人工浏览器显示验收，后续分支仍为建议。
 
 ### 每个 PR 的基本流程
 

@@ -554,3 +554,123 @@ Tree 用结果自带的 ShapeDescription.summary、显式样式和 children 显�
 认可 Dispatcher 绑定渲染回调的设计，Renderer 不新增命令名称分派。词法规则采用独立整行注释、双引号完整参数和 quoted 标记。正常结束通过 EOF 实现，不额外增加正式退出命令。
 
 核对结论： 当前 CLI 设计与既有 Commands、Model 模块能够保持清晰的职责边界。终端显示和键盘 EOF 行为仍以本地实际运行观察为最终依据，真实 SVG IO 留待 PR06。
+
+## 16. PR 06 SVG 持久化与完整集成（2026-10-31）
+
+本节是当前实际 IO 实现；§12 D1–D6、PR03～PR05 的历史说明和已填人工结论保留。真实 Read/Save 已接入原 Dispatcher/Executor，不再返回未实现提示；PR05 已确认的注释、引号、quoted 标记规则不变。
+
+### 16.1 类与真实接口
+
+| 文件 | 接口与职责 |
+|---|---|
+| `src/io/SvgStore.ts` | 原契约不变：`read(path): Promise<{document, warnings}>`、`write(path, document): Promise<void>`；不提供 Session 或 History 访问 |
+| `SvgParser.ts` | `parse(xml)` 返回 Document 与只读 warnings；XML DOM 转中立节点，校验子集/命名空间/几何/尺寸，预收集 ID 后分配缺失 ID，再经 Factory/Document 构造合法模型 |
+| `SvgSerializer.ts` | `serialize(document): string`；validate 后统一遍历 toSvgNode，转义属性/文本、保持显式样式和顺序，不按图形类型分派 |
+| `SvgFileStore.ts` | 实现 SvgStore，构造注入 Parser/Serializer（有默认值）；限量分块读 UTF-8 文件，同目录临时文件完整写入、sync、关闭、rename；不依赖 commands/cli |
+| `src/commands/ReadCommand.ts` | boundary、requiresDocument=false；通过 SvgStore 读取并在 Context 声明新文档/readPath，返回缺 ID 警告 |
+| `SaveCommand.ts` | boundary；选择显式路径或最近 readPath，在 Context 登记延迟写入，返回预先准备的结果；不改变 readPath |
+
+main 创建唯一 SvgFileStore 并传入 Dispatcher；Dispatcher 构造器现在要求存储依赖，类型从 ReadCommand 的构造参数推导，仅依赖 commands，不直接访问 fs。read/save 的名称和格式回调仍在原 Map；它们只依赖 SvgStore 抽象。Factory 仍是唯一图形类型映射。
+
+```plantuml
+@startuml
+title PR06 实际 IO 与提交依赖
+component "main.ts" as Main
+package "cli" {
+  class CommandDispatcher
+  class CliRepl
+  class CliRenderer
+}
+package "commands" {
+  class ReadCommand
+  class SaveCommand
+  class CommandContext
+  class CommandExecutor
+  class EditorSession
+  class CommandHistory
+}
+package "io" {
+  interface SvgStore
+  class SvgFileStore
+  class SvgParser
+  class SvgSerializer
+}
+package "model" {
+  class Document
+  class ShapeFactory
+}
+Main --> SvgFileStore : 组合存储
+Main --> CommandDispatcher : 注入存储契约
+Main --> CommandExecutor
+Main --> CliRepl
+CliRepl --> CommandDispatcher
+CliRepl --> CommandExecutor : 顺序 await
+CommandDispatcher --> ReadCommand
+CommandDispatcher --> SaveCommand
+CommandDispatcher --> CliRenderer : 格式回调
+ReadCommand --> SvgStore : read
+SaveCommand --> SvgStore : 延迟 write
+ReadCommand --> CommandContext
+SaveCommand --> CommandContext
+CommandExecutor --> CommandContext : 准备外部效果
+CommandExecutor --> EditorSession : 单次状态替换
+EditorSession --> CommandHistory
+EditorSession --> Document
+SvgFileStore ..|> SvgStore
+SvgFileStore --> SvgParser
+SvgFileStore --> SvgSerializer
+SvgParser --> ShapeFactory
+SvgParser --> Document
+SvgSerializer --> Document : 中立节点
+@enduml
+```
+
+### 16.2 对 PR04/PR03 的最小适配
+
+- Command 接口、SvgStore 方法签名、EditorSession 私有状态提交、CommandHistory 两栈协议均未修改。
+- Context 新增 `hasBeforeCommit`、`deferBeforeCommit(effect)`、`prepareBeforeCommit(document)`：至多登记一次外部效果，准备时克隆并校验独立文档供存储使用。它不持有文件系统或 Session 引用。
+- Executor 在结果复制后拒绝 edit/query 登记外部写入；完成候选校验、提交副本、History、新状态以及写入副本准备后，await 外部效果，再单次 commit。原命令未登记效果时不增加文档克隆，旧四阶段克隆故障测试保持通过。
+- ShapeFactory.fromSvgNode 新增可选 `defaultGeometry=false`，仅 SVG Parser 传 true，按其原类型定义为缺失几何补 0。默认严格行为和 create 接口不变，没有在 Parser 再维护类型到几何字段的映射。
+- Dispatcher 构造器要求注入存储，main 与两份原 CLI 测试同步适配。旧“read/save 未实现”断言改为注入确定失败的 Store 并验证错误及原状态保持，原用例没有删除/跳过；真实文件验证由新增测试承担。
+
+### 16.3 Read/Save 顺序与路径
+
+Read：tokens → Dispatcher → ReadCommand → SvgStore.read → UTF-8/DOM/中立节点/自动 ID/Factory → Context 替换意图 → Executor 结果复制/validate/clone/新 blocked History → Session 一次提交 → Renderer 输出警告与摘要。解析、结果或提交准备失败，旧 Document/readPath/两栈/blocked 保持；未成功提交的读取不输出成功警告。
+
+Save：tokens → Dispatcher → SaveCommand 选择路径并登记写入 → Executor 预备结果、候选与提交文档、空且 blocked 的 History、新状态、独立写入文档 → FileStore 完整序列化 → 同目录临时文件写入/sync/关闭 → rename → Session 单次状态提交 → Renderer 反馈。写入失败不提交新内存状态。IO 执行期间 busy 保持，重叠 execute/undo/redo 仍拒绝。
+
+D4 路径不扩展：无参 save 使用最近一次成功 read 的原路径字符串；显式 save-as 不改变 readPath，init 清空 readPath。没有读入路径时无参 save 报 `error: no read path. specify a save path`。成功 read/save 都是历史边界；下一次成功编辑解封，不能撤销穿过该边界。
+
+### 16.4 SVG 子集与用户确认的默认值
+
+本轮用户明确选择“根尺寸缺失时使用 800×600，其余采用上述规则”。据此：缺失 width 补 800、缺失 height 补 600；已提供的尺寸仍须有限且为正，空串/0/负数/Infinity/任意单位后缀不能触发默认。几何缺省值补 0；根尺寸、几何与 stroke-width 允许完整数值或 px，不支持 %/cm/em 等单位。viewBox 仅接受 `0 0 width height`（可用合法空白/逗号分隔），其他映射明确报错，不从 viewBox 推断缺失尺寸。
+
+支持 rect/circle/ellipse/line/text/g、嵌套与顺序、空组/空画布、显式 fill/stroke/stroke-width、中文/Unicode、基本 XML 实体和字符引用、text 内 CDATA、自闭合与普通闭合标签。SVG namespace 可省略或使用标准 URI；标准命名空间前缀会规范化为无前缀 SVG。输出包含 namespace、width/height、等值 viewBox、UTF-8 声明；注释等不影响显示的 XML 注释不作为模型内容保留。
+
+缺 ID 在调用 Factory 前处理：先遍历预留全部显式 ID（大小写敏感，重复/空白 ID 拒绝），再按深度优先顺序、每标签从 1 开始，选取首个未占用的 `标签名+序号`；例如已有 rect1 时缺 ID 的 rect 获 rect2。已有 ID 不改；警告采用任务书模板。SVG 根是画布，不作为可编辑 Shape 自动分配 ID。
+
+明确不支持 transform、非默认 viewBox、path/image/script/tspan/defs 等复杂元素、style/样式表、font-size/rx 圆角等模型无法表示的属性、额外或错误命名空间属性、外部 paint 引用、var()、非 UTF-8/XML 1.0、DTD/自定义实体。未知属性/元素报错而非静默丢弃。root 只接受尺寸/viewBox/version 与命名空间声明，不接收额外视觉属性。不是通用 CSS 校验器；保留 PR05 create 的 HEX 限制，不新增 set/导入的完整颜色语法校验。
+
+### 16.5 XML 依赖、安全和资源限制
+
+锁定运行时依赖 `@xmldom/xmldom@0.9.12`，更新 package 与锁文件；选择其 DOM 结构解析和自带类型，不用正则解析嵌套结构。版本经 npm 实际查询，安装审计为 0 个已知漏洞，不能据此宣称零缺陷。依据见 [项目文档](https://github.com/xmldom/xmldom)，并检查了安装包 dom-parser/sax 源码的 XML 实体表与忽略外部实体解析方法。
+
+实现前置拒绝 DTD/ENTITY 声明标记，不注册/展开自定义实体，不加载外部文件或网络资源；该保守声明守卫也可能拒绝注释/CDATA 中的同类标记。使用 application/xml，解析警告/错误均中止；仅对库的“合法字面 U+FFFD”提示作精确例外，实际文件 UTF-8 解码仍使用 fatal 模式。实测发现库会接受非法字符引用如 `&#0;`，因此在原始 XML 及解码后属性/文本增加 XML 1.0 字符检查；Serializer 同样拒绝非法字符。
+
+文件分块读取在超过 16 MiB 时停止并关闭句柄；Parser 进入 DOM 前检查 UTF-8 字节数，转换树最大 100000 个节点/256 层。Serializer 设对应输出大小/数量/深度限制，避免写出超出本工具读取范围的文件。文本/属性按 XML 转义，属性换行/Tab 和文本 CR 通过数字引用保留；不将文本拼接为 XML 标签或执行脚本。
+
+### 16.6 文件替换与非原子窗口
+
+FileStore 在目标目录用随机名加 wx 创建自有临时文件，完整 writeFile、sync、close 后 rename 到目标，绝不以先 unlink 旧目标为覆盖方案。常规 open/write/sync/close/rename 失败时尝试关闭句柄并只清理自己创建的临时文件；清理本身失败会明确报告临时路径，不假装清理成功。写入不自动创建缺失目录。权限等读写错误使用 cannot read/write file 模板，XML/模型错误保留可理解的原因。
+
+同目录 rename 在本机测试中完成替换，但不能将 [Node 文件系统接口](https://nodejs.org/docs/latest-v24.x/api/fs.html#fspromisesrenameoldpath-newpath)描述为所有 Windows/Linux/网络文件系统绝对原子。未做目录 fsync、断电恢复、文件锁、元数据/权限继承或多进程写者协调；替换使用新临时文件的权限。同一会话的 busy 不等于跨进程文件锁。
+
+内存与磁盘不共享事务。所有已知可失败的内存准备都放在写盘前，正常写盘成功后只做私有状态引用赋值；但 rename 成功后进程中断、运行时异常或人为注入 commit 失败，仍可能出现“磁盘已更新、Session 未提交”。新增故障测试明确演示这一窗口，未自动回滚磁盘或声称分布式原子性；必要时应核查磁盘并重新 read 建立基线。
+
+**【人工核对】[已核验]** 对照 §16 图、Context/Executor 的延迟效果与 Store 写入顺序，确认上述窗口、支持子集和 D1～D6 一致。用浏览器实际打开保存的 SVG，核验中文/特殊字符、颜色继承、嵌套顺序和画布尺寸；图仅静态核对，未执行 UML 渲染。核对结论：根据 PR06 的源码审查和自动化检查证据，新增 IO 模块保持了原定依赖方向。Commands 仅引用 SvgStore 接口，IO 依赖 Model，不反向依赖 Commands 或 CLI，文件系统操作集中在 SvgFileStore 中。
+
+本轮没有修改 Command、CommandHistory、EditorSession 的既有状态协议，也没有增加新的命令名称或图形类型分派。Read/Save 复用原 Dispatcher 和 Executor，新增的延迟外部效果机制属于原事务执行流程的必要扩展。
+
+ShapeFactory 的可选几何缺省参数保持原有默认严格校验行为，仅供 SVG Parser 在读取文件时使用，没有改变既有命令的参数校验规则。
+
+根据现有静态检查和测试报告，PR06 与 PR02～PR05 的模块职责、接口边界及 D1～D6 保持一致。对 CommandContext 和 CommandExecutor 的调整具有明确的文件写入需求依据，认可当前实现细化。

@@ -6,6 +6,50 @@
 
 ## 1. 架构方案
 
+### PR 06 SVG 文件持久化（2026-10-31，待人工验收）
+
+当前在 `feat/IO-001-svg-persistence` 接入真实 Read/Save，模型、命令和 CLI 的完整生命周期已由实际文件测试验证。实际类、流程、接口适配和限制见 [architecture.md §16](architecture.md#16-pr-06-svg-持久化与完整集成2026-10-31)。PR03～PR05 及 D1–D6 原记录与人工结论保留；此处自动验证不代替浏览器与最终人工签收。
+
+| 文件/组件 | 当前职责及变化 |
+|---|---|
+| `src/io/SvgStore.ts` | 方法签名保持原样，仅将未来契约注释更新为实际边界；Command 仅依赖此抽象 |
+| `SvgParser.ts` | 使用锁定版本的 XML DOM 库解析结构，检查支持子集，规范化数值/默认值、预留/自动生成 ID，再交 Factory/Document |
+| `SvgSerializer.ts` | 统一遍历中立节点、转义文本/属性、保持显式样式和顺序，输出 UTF-8 SVG 字符串 |
+| `SvgFileStore.ts` | 有大小上限的分块读取、严格 UTF-8 解码；同目录随机临时文件完整写入/sync/close/rename，失败只清理自有临时文件 |
+| `ReadCommand.ts`、`SaveCommand.ts` | 两种 boundary 命令；read 声明文档/路径替换及警告，save 登记延迟写入，不改变 readPath |
+| `CommandContext.ts`、`CommandExecutor.ts` | 新增提交前延迟外部效果，内存/结果/历史/写入副本预备完成后才写盘，成功后一次提交 |
+| `CommandDispatcher.ts`、`main.ts` | 注入 SvgStore，read/save 使用原名称映射和渲染回调；主入口组合真实 FileStore，Parser/REPL/Renderer 词法与行为未改 |
+| `ShapeFactory.ts` | fromSvgNode 增加可选 defaultGeometry=false；仅 Parser 开启缺失几何补 0，复用原类型定义，其他调用保持原严格规则 |
+
+```plantuml
+@startuml
+title PR06 当前实际模块依赖
+component "main.ts（组合）" as Main
+package "cli" as CLI
+package "commands" as Commands
+package "io（SvgStore / Parser / Serializer / FileStore）" as IO
+package "model" as Model
+Main --> CLI
+Main --> Commands
+Main --> IO
+CLI --> Commands
+CLI --> Model : 描述/验证/错误类型
+Commands --> IO : 仅 SvgStore 抽象
+Commands --> Model
+IO --> Model
+@enduml
+```
+
+Save 的实际顺序：结果复制 → 候选/提交文档校验与克隆 → 空且 blocked 的新 History → 新 SessionState → 独立写入副本 → 完整 XML → 临时文件写入/sync/close/rename → 单次状态赋值。失败准备/写入保留旧内存与历史；正常提交后没有克隆/回调/IO。Read 同样在完整解析与候选准备成功后提交，警告随成功结果输出。IO 异步期间保持 busy，重叠调用拒绝。D4 路径严格保持最近成功 read，save-as 不更新路径，init 清空路径。
+
+本轮新增依赖 `@xmldom/xmldom@0.9.12`（固定版本、自带类型），安装审计为 0 个已知漏洞；不等于没有解析缺陷。DTD/自定义实体被拒绝，不执行脚本或读取引用资源；未知元素/视觉属性和变换不静默丢弃。新增输入/解码后 XML 字符检查，弥补库对非法字符引用的接受，见 §2.11。支持六类、嵌套、显式样式、文本实体及中文 Unicode、等值 viewBox；不支持完整 SVG/CSS。
+
+用户本轮明确确认：缺失根尺寸分别补 width=800、height=600；提供的尺寸须正且有限，完整数值或 px；几何缺省补 0；viewBox 仅接受 `0 0 width height`，其他映射报错。实现限制为 16 MiB 输入/输出、100000 节点/256 层。D1～D6 不变；详见 architecture.md §16.4～§16.6。
+
+**已知窗口**：文件系统与 Session 无共同事务；rename 成功后若进程中断或异常 commit 失败，磁盘可已更新而内存仍旧。测试主动演示此窗口，不作绝对原子声明。清理失败会报告临时路径；未实现目录 fsync、断电恢复、文件锁、多进程协调或元数据继承。
+
+**【人工核对】[已核验]** 对照 Context/Executor/FileStore 的实际顺序及 §16 图，核验 D4 路径、D5 子集与默认值、警告与失败状态保持，确认上述非原子窗口和限制可接受。结论：已核对，符合要求。
+
 ### PR 05 CLI 集成（2026-10-30，待人工验收）
 
 当前在 `feat/CLI-001-interactive-editor` 将 PR03 Model 与 PR04 Commands 接入真实终端入口；没有重写模型、执行器或历史。实际组件、接口、词法规则与图见 [architecture.md §15](architecture.md#15-pr-05-cli-实际架构2026-10-30)。Read/Save 仅输出尚未实现，真实 SVG IO 留待 PR06。
@@ -399,7 +443,53 @@ set t1 text "A # B" # comment
 
 在 `feat/CLI-001-interactive-editor` 根据用户人工测试发现的 `#12/#zi/#中文` 漏洞，补充 ShapeFactory.create 对可选 fill/stroke 的 HEX 校验；此前仅验证字符串，合法参数数量不能排除非法颜色。本轮修改 ShapeFactory.ts、factory/cli-dispatcher/cli-integration 三份测试及三份文档；保留现有未提交工作、原任务书与已填人工结论。验收关注 3/4/6/8 位 HEX、大小写、引号/空白与失败原子性；未新增抽象或第三处分派，未扩展 set、XML 导入或通用 CSS 校验。用户明确提出修正规则，本轮未发生自动测试失败；PR 待创建、commit 待创建，未暂存/提交/推送/合并。
 
+### 2.11 PR06 IO 与完整 CLI 集成记录（2026-10-31）
+
+- 分支 `feat/IO-001-svg-persistence`；PR 待创建、commit 待创建。初始工作区干净，PR05 提交为 `98d2c06`。本轮 fetch origin 成功，获取 `origin/main=d070143`（Merge pull request #5），祖先检查退出码 0，确认 PR05 已合并。非当前 main 通过非强制 fetch refspec 快进至同一提交，差异计数 `0 0`，再从 main 创建指定分支；未 merge、暂存、commit、push 或创建 PR/tag。
+- 阅读规范、原需求、架构/报告、主入口与已有模型/命令/CLI/测试契约。新增 5 个业务类（IO 三类、Read/Save 两类）与 4 份专项测试及 io-fixtures.ts，移除 IO 的 .gitkeep；修改 Context/Executor、Factory、Dispatcher/main、SvgStore 注释、package/锁文件与两份旧 CLI 测试，更新三份文档。既有 Command 接口、History、Session、CLI 词法类和 tsconfig 未改。
+- XML 方案先检查 saxes 和 xmldom 官方资料及源码，选择后者的 DOM API/自带类型；实际 `npm.cmd view @xmldom/xmldom version` 为 0.9.12，固定版本安装，审计 5 个包、0 个已知漏洞。没有将正则替代 XML 结构解析；声明/标量/字符守卫仅补充库行为，源码依据与边界见 architecture.md §16.5。
+- 发现原 Executor 会在 Command.execute 返回后继续执行可能失败的克隆/历史准备，若 Save 直接在 execute 写盘，磁盘可提前变化。采用 Context 登记一个延迟效果，Executor 预备全部内存与独立写入副本，再 await write 后只提交状态引用。没有引入另一套历史、文件事务框架或第三处名称分派；强制外部效果只用于 boundary。
+- 对任务书未明确的 SVG 根尺寸/单位/几何缺省/映射，向用户提出规则并收到“根尺寸缺失时使用 800×600，其余采用上述规则”。据此缺失 width/height 分别补 800/600，保留并严格校验已提供值；几何补 0，支持数值/px，viewBox 只允许等值映射。该回复是本轮决策依据，不倒写为任务书原文。
+- 首次源码 typecheck 在 DOM localName 可为空的类型处报 TS2322，使用 tagName 回退后通过。新增测试首轮共 234 项，233 pass/1 fail，原因是新增完整生命周期用例把 7 个图形误计为 8；核对 scene、五个叶子及 pair 共 7 个后修正该新断言。后续补充 XML 字符、大小上限、IO 准备失败与最终默认值验证，最终 242 项通过；没有删除或跳过旧测试。
+- 边界探测发现所选库会接受 `&#0;`、非法代理字符等 XML 字符；在 Parser 对原文和解码后文本/属性加 XML 1.0 字符守卫，Serializer 同步拒绝非法字符。库对合法 U+FFFD 的编码提示作精确例外，FileStore 的 UTF-8 字节解码依然 fatal。新增回归验证该修正，未把安装审计当作正确性证明。
+- 旧测试中“Read/Save 尚未实现”的断言随功能落地适配为注入确定失败的 Store，精确断言错误路径和读/写类型，保留原文档/历史不变断言；新真实文件测试均使用独立临时目录并核验清理路径，未操作用户文件。实际 npm CLI 管道完成 save/read/中文/继续编辑/Undo/Redo/默认 save/失败读取后继续，退出码 0；未启动浏览器，不编造显示实测。
+
+**【人工填写】[已填写]** 请记录本人对 XML 子集、缺省值规则、两阶段保存与非原子窗口的理解，以及亲自打开 SVG 和复现测试的观察。只填写真实经历；个人反思：本轮主要关注 SVG 文件持久化、模型与文件格式的转换，以及文件写入与会话状态提交的一致性。
+
+对于 XML 解析，我认可将支持范围限制在任务书要求的六种图形及基本样式，而不是直接支持完整 SVG 标准。对于 transform、未知视觉属性和无法正确表达的 viewBox，明确报错比静默忽略更合理，因为后者可能导致重新读取的图形与原文件显示结果不一致。
+
+对于缺省值规则，本轮确认缺失的画布宽、高分别采用 800 和 600，缺失几何属性补 0，viewBox 仅接受与画布尺寸一致的原点映射。我认为这些规则既便于与现有 Model 对接，也使文件读取行为更加明确、可测试。但这些属于本轮人工确定的实现规则，不应写成任务书原有的强制要求。
+
+对于保存机制，我认可通过 CommandContext 登记延迟写入操作，由 CommandExecutor 先完成候选文档、历史快照、结果和新会话状态的准备，再执行文件写入，成功后提交 Session。这比直接在 SaveCommand.execute 中写盘更合理，能够避免内存准备失败时磁盘已经提前改变。
+
+同时，我理解文件系统与内存 Session 不共享事务。即使采用临时文件、sync 和 rename，仍然可能在文件替换成功后、Session 提交前发生进程中断，导致磁盘与内存状态暂时不一致。考虑到本项目是单用户 CLI 编辑器，我接受这一已明确记录的限制，不额外引入复杂的文件事务和恢复框架。
+
+
 ## 3. 一致性自查
+
+### PR06 一致性检查（2026-10-31）
+
+| 项目 | 自动结果 | 依据与限制 |
+|---|---|---|
+| 四模块职责与依赖 | 通过（TypeScript AST + DFS） | 46 源 TS 文件、40 类，无环；commands 对 IO 只引用 SvgStore，IO 无 commands/cli 依赖；XML 库只在 IO，fs 只在 FileStore |
+| 一类一文件 | 通过 | 5 个新增类与文件名一致，接口/临时中立值不替代领域行为；未新增通用框架 |
+| 两处名称分派 | 通过（源码） | 原 Dispatcher Map 接入 read/save，原 Factory 定义用于读取；Parser 数字属性集合是标量规范化，不是图形类型映射，Serializer 统一遍历 |
+| PR04 状态协议 | 已登记并验证 | Command/Session/History 接口不变；Context/Executor 延迟效果是在原提交路径前追加，旧 155 项继续运行 |
+| PR03/PR05 适配 | 已登记并验证 | Factory 新参数默认 false；Dispatcher 注入存储，旧未实现断言替换为更精确的失败存储断言；Parser/REPL/Renderer、HEX 规则不变 |
+| D1～D6 | 通过（实现/测试核对，人工待核验） | 完整快照、样式继承、D3 顺序、D4 路径、D5 拒绝未知视觉内容、D6 树写入都沿用；读写不直接改索引/History |
+| 保护路径 | 通过（diff） | AGENTS、任务书、两份 tsconfig、Command.ts/CommandHistory.ts/EditorSession.ts、CLI 词法/REPL/Renderer 无改动 |
+
+**【人工核对】[已核验]** 对照本节与 architecture.md §16 核验新增 IO 和延迟写入顺序，尤其是“全部内存准备在写盘前”和“磁盘/内存仍非绝对原子”两点。结论：对照 PR06 的实现说明及 architecture.md §16，重点核对了 IO 模块职责和 Read/Save 的执行流程。
+
+SvgParser 负责 XML 解析及支持子集验证，SvgSerializer 负责 Document 到 SVG 文本的转换，SvgFileStore 负责实际磁盘读写。Commands 仅通过 SvgStore 抽象使用 IO，不直接依赖具体文件操作类。
+
+保存时，CommandExecutor 先准备候选文档、结果、历史和 SessionState，再执行延迟写盘，成功后提交会话状态。读取时，在完整解析及候选状态准备成功后替换正式文档并建立历史边界。
+
+D4 路径规则保持不变：最近一次成功 read 的路径用于无参 save，显式 save-as 不更新 readPath，init 清除路径。
+
+D5 仅支持约定的 SVG 子集，对无法正确表示的视觉属性明确拒绝，不静默丢弃。
+
+认可 PR06 当前 IO 与 Commands 的集成方案。接受已记录的 SVG 子集限制及磁盘与内存之间的非原子窗口。根据现有源码和测试报告，未发现需要调整 D1～D6 的问题。
 
 2026-10-31 补漏自查：相较 10-30 的“模型未修改”，现仅修改 `src/model/ShapeFactory.ts` 中 create 可选样式校验；利用既有定义定位颜色，不增加 CLI 类型分支，依赖方向和 D1–D6 不变。旧一致性表是当时记录，本次变更与新测试证据见 §2.10/§4.11。
 
@@ -513,8 +603,8 @@ PR 01：业务架构与模块依赖关系暂不适用，待后续实现。检查
 | 六种图形类型 | [已自动验证] | 模型/工厂测试与 cli-dispatcher、cli-integration 的六类创建 |
 | create / delete / move / scale / set | [已自动验证] | commands、cli-dispatcher 的真实编辑及 Undo/Redo；cli-integration 连续输入 |
 | group / ungroup / addto / front / back | [已自动验证] | document/commands 的 D3 与树不变量，CLI 的顺序/父关系断言 |
-| undo / redo 和 IO 后禁止规则 | [部分验证] | 完整快照与 init/canvas 边界已测；read/save 边界留待 PR06 |
-| read / save SVG 回读 | [待实现 / 未验证] | 仅 SvgStore 接口与 CLI 未实现提示，无真实文件验收 |
+| undo / redo 和 IO 后禁止规则 | [已自动验证] | 原命令历史与 io-history.test.ts 的 read/save 边界、解封、失败保持和异步重叠拒绝 |
+| read / save SVG 回读 | [已自动验证，浏览器待核验] | svg-codec/svg-file-store/cli-io 真实 UTF-8 保存和多次语义回读；不代表人工视觉验收 |
 | 唯一 id、错误原子性和非法参数 | [已自动验证] | 模型/命令故障注入、CLI 非法输入后的文档/路径/历史保持 |
 | tree / show / help 与 REPL | [已自动验证，人工体验待核验] | cli-renderer 精确排版断言、REPL 与编译入口的顺序/EOF/恢复测试 |
 
@@ -638,34 +728,64 @@ PR 01：业务架构与模块依赖关系暂不适用，待后续实现。检查
 
 本次仅新增 create 的 # 颜色校验，不宣称提供通用 CSS 颜色校验或验证真实 SVG 文件。首次注释纠偏的 145/56 项结果保留在 §4.10，当前结果以本节为准。本轮文档链接、改动源码/测试空白、TypeScript AST 依赖/类名（41 源文件、35 类，无环）及 `git diff --check` 均通过；未重跑人工终端、真实 IO、UML 渲染、lint、覆盖率或性能测试。已有人工结论与反思原文保留；新增规则只作为带日期的待核验/待填写补充，不能视作已经由本人验收。
 
+### 4.12 PR06 实际验证记录（2026-10-31）
+
+| 实际命令/检查 | 结果 | 证据及限制 |
+|---|---|---|
+| `npm.cmd view @xmldom/xmldom version`、固定版本 install | 0.9.12；安装成功，0 个已知漏洞 | package/锁文件已更新；不是完整安全审计 |
+| 首次 `npm.cmd run typecheck` | 失败，退出码 1 | DOM localName 的 string/null 类型错误；修正 tagName 回退后通过 |
+| 新增测试首轮 `npm.cmd test` | 234 项，233 pass / 1 fail | 新生命周期测试的图形计数 8 应为 7；原有测试未失败 |
+| 最终 `npm.cmd test` | 242 pass / 0 fail，退出码 0 | 包含源码 build、测试编译；保留既有 155 项，新增 87 项 |
+| 最终 `npm.cmd run typecheck` | 通过，退出码 0 | 源码与测试 |
+| 各新增文件用 `node --test --test-reporter=tap dist/tests/tests/<文件>.test.js` 单独运行 | svg-codec 52 / svg-file-store 11 / io-history 20 / cli-io 4，全通过 | 使用 Node spawnSync 分别执行并检查退出码，测试明细如下 |
+| `npm.cmd ls --depth=0` | 通过 | typescript 5.9.3、@types/node 24.19.2、@xmldom/xmldom 0.9.12 |
+| 实际 `npm.cmd run cli`（Node 子进程，15s 超时） | 通过，退出码 0 | 实际构建/启动，真实保存/读取/默认保存、中文特殊字符、Undo/Redo、失败读取后 show；读取落盘文件检查坐标/父节点/文本；临时目录已清理 |
+| 临时 TypeScript AST/依赖 DFS、空白检查 | 通过 | 46 源文件/40 类，无命名错误、非法依赖或环；src/tests 无行尾空白；Command 只经存储契约 |
+| `git diff --check` 与保护路径 diff | 通过 | 换行转换提示不属于空白错误；无任务书/规范/tsconfig 或 Session/History 核心改写 |
+
+新增自动测试：
+
+- `tests/svg-codec.test.ts`：52 项。六类与复杂层级、重复三次语义往返、显式/继承样式、空文档/组、namespace、px、实体/CDATA/Unicode、ID 预留/补齐/重复与大小写、严格 Factory 兼容；非法 XML/根/尺寸/几何/未知视觉属性、transform/viewBox、外部资源/DTD/实体拒绝；原始/解码后非法字符及合法 U+FFFD；输入/输出大小和深度边界。
+- `tests/svg-file-store.test.ts`：11 项。真实 UTF-8 保存/读取/覆盖及无临时残留；带空格/中文路径；文件缺失/空/错误 XML/非 SVG/非法 UTF-8/不支持内容/非法路径；用可控 open 故障模拟无权限，不冒充 Windows ACL 实测；open/write/sync/close/rename 分阶段失败保留原字节并清理；已有目录不被删除；序列化失败不触碰文件；超限读取停止并关闭句柄。
+- `tests/io-history.test.ts`：20 项。read 可先于 init，警告与 blocked；最近 read 路径/default save/save-as/init 生命周期；真实失败读写保留完整文档/索引/路径/两栈和 blocked；三次 save clone 与三次 validate 故障、History 准备失败、结果复制失败不写盘；Read 结果/无效候选失败；存储引用隔离；read/save 异步 gate 中拒绝重叠编辑/查询/Undo/Redo；失败释放 busy；拒绝非 boundary 写入或重复登记；注入 commit 失败明确演示磁盘已写而内存未提交的窗口。
+- `tests/cli-io.test.ts`：4 项。真实 CLI/Commands/Model/FileStore 全生命周期及二次保存；六类、嵌套/顺序、样式、中文/引号内空格/XML 特殊字符；读取失败不发成功警告、当前文档保持且可继续保存；外部缺 ID 后可编辑生成 ID；编译入口子进程、CRLF/末行无换行/EOF，落盘内容回读和历史边界。
+- `tests/io-fixtures.ts`：只提供测试用复杂文档、语义/索引快照与临时目录助手，不计独立测试；递归清理前验证绝对路径位于系统临时目录且含任务专用前缀。
+
+三份文档相对链接、UML 块起止配对与最终 diff 检查通过；UML 配对不等于渲染验证。尚未运行：浏览器实际打开、人工终端/键盘体验、Linux/macOS/网络文件系统实机、断电/进程崩溃恢复、UML 渲染、lint、覆盖率、性能基准。自动 XML namespace/结构验证和真实文件回读不能替代浏览器画面验收。目录 fsync、文件锁、元数据保留、多进程协调和完整 SVG/CSS 均未实现，不把局限写成绝对原子保证。
+
 ## 5. 本次会话待人工处理清单
 
 > AI 每次开发会话结束时更新这里，只保留当前仍未处理的问题；已解决事项迁移到相应章节的审查结论或记录中。不得替用户填“已审核”。
 
-- [ ] **【人工核对】[待核验]** 根 README 进度同步：核对根 `README.md` 的当前状态、第 3/5/6 节与本报告 PR04 验收结论是否一致；确认命令 API 已实现、CLI/真实 IO 待实现的表述准确。核对结论：[待填写]。
+- [x] **【人工核对】[已核验]** 根 README 进度同步：核对根 `README.md` 的当前状态、第 3/5/6 节与本报告 PR04 验收结论是否一致；确认命令 API 已实现、CLI/真实 IO 待实现的表述准确。核对结论：已确认一致性。
 
-- [ ] **【人工核对】[已核验]** 对照 `package.json`、两份 tsconfig、`src/main.ts` 和 `tests/smoke.test.ts`，复核第 1 节工程基线、第 3 节一致性自查，确认目录创建没有被误写为完成业务架构。[判断]没有被误写为完成业务架构
-- [ ] **【人工核对】[已核验]** 在本机用 `npm.cmd run build`、`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd start` 复现第 4.1 节结果，确认启动输出和 1 项测试；第 4.3 节保留个人验收结论。[判断]复现成功，确认启动输出和测试没问题。
-- [ ] **【人工填写】[已填写]** 在第 2.2 节按真实经历填写个人判断与收获；没有实际分歧时如实注明，不补写不存在的讨论。第 4.3 节填写本人观察、质量评价及签收信息；架构相关字段待 PR 02 设计后填写。[判断]
+- [x] **【人工核对】[已核验]** 对照 `package.json`、两份 tsconfig、`src/main.ts` 和 `tests/smoke.test.ts`，复核第 1 节工程基线、第 3 节一致性自查，确认目录创建没有被误写为完成业务架构。[判断]没有被误写为完成业务架构
+- [x] **【人工核对】[已核验]** 在本机用 `npm.cmd run build`、`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd start` 复现第 4.1 节结果，确认启动输出和 1 项测试；第 4.3 节保留个人验收结论。[判断]复现成功，确认启动输出和测试没问题。
+- [x] **【人工填写】[已填写]** 在第 2.2 节按真实经历填写个人判断与收获；没有实际分歧时如实注明，不补写不存在的讨论。第 4.3 节填写本人观察、质量评价及签收信息；架构相关字段待 PR 02 设计后填写。[判断]
 
-- [ ] **【人工决策】[已填写]** 在 `doc/architecture.md` §12 D1–D6（进入 PR 03 前）逐项填写：快照历史 / 普通 g 样式 / 跨父分组 / 默认保存路径 / 外部 SVG 和 transform 范围 / 模块及树写入协议。每项已提供推荐理由与备选；将批准结论同步本报告 PR 02 架构小节。
-- [ ] **【人工核对】[已核验]** 在 `doc/architecture.md` §12 核对任务书限制、两处分派及三图，建议用跨父 group 和子节点显式 fill 两个例子检验 D2/D3；本报告 §3.3 填写结论。使用 PlantUML 预览工具检查三图语法/布局，本轮尚未渲染。
-- [ ] **【人工核对】[已核验]** 核验本报告 §2.3 的分支与 PR #1 合并事实、§4.4 的自动检查结果；可用 git log 和 npm 三条命令复现，确认只有两份文档改动。人工核验结果仍待本人填写。
-- [ ] **【人工填写】[已填写]** 在本报告 §2.2/§2.3 补充对架构取舍的真实判断和反思；在 architecture.md §12 填写本人接受或调整的理由。§4.3 最终验收字段继续保留
+- [x] **【人工决策】[已填写]** 在 `doc/architecture.md` §12 D1–D6（进入 PR 03 前）逐项填写：快照历史 / 普通 g 样式 / 跨父分组 / 默认保存路径 / 外部 SVG 和 transform 范围 / 模块及树写入协议。每项已提供推荐理由与备选；将批准结论同步本报告 PR 02 架构小节。
+- [x] **【人工核对】[已核验]** 在 `doc/architecture.md` §12 核对任务书限制、两处分派及三图，建议用跨父 group 和子节点显式 fill 两个例子检验 D2/D3；本报告 §3.3 填写结论。使用 PlantUML 预览工具检查三图语法/布局，本轮尚未渲染。
+- [x] **【人工核对】[已核验]** 核验本报告 §2.3 的分支与 PR #1 合并事实、§4.4 的自动检查结果；可用 git log 和 npm 三条命令复现，确认只有两份文档改动。人工核验结果仍待本人填写。
+- [x] **【人工填写】[已填写]** 在本报告 §2.2/§2.3 补充对架构取舍的真实判断和反思；在 architecture.md §12 填写本人接受或调整的理由。§4.3 最终验收字段继续保留
 
-- [ ] **【人工核对】[已核验]** PR03：对照本报告 §1 PR03 实现图、§3 PR03 自查及 architecture.md §13，抽查 `Group.ts` 的冻结数组/withChildren/clone 和 `Document.ts` 的 transform/commit；确认结构操作后按 id 重定位可接受，并确认没有实现 CLI/Commands/IO。
-- [ ] **【人工核对】[已核验]** PR03：运行 `npm.cmd run typecheck`、`npm.cmd test`，复现 §4.5 的 40 项通过；特别查看 document.test 的 D3 嵌套跨父用例、shapes.test 的溢出用例和 factory.test 的循环输入用例。
-- [ ] **【人工填写】[已填写]** PR03：在 §2.4 填写本人对结构封装、深副本及失败原子性的真实反思；本轮验收意见与是否提交由本人决定，不代填通过或执行 commit。
+- [x] **【人工核对】[已核验]** PR03：对照本报告 §1 PR03 实现图、§3 PR03 自查及 architecture.md §13，抽查 `Group.ts` 的冻结数组/withChildren/clone 和 `Document.ts` 的 transform/commit；确认结构操作后按 id 重定位可接受，并确认没有实现 CLI/Commands/IO。
+- [x] **【人工核对】[已核验]** PR03：运行 `npm.cmd run typecheck`、`npm.cmd test`，复现 §4.5 的 40 项通过；特别查看 document.test 的 D3 嵌套跨父用例、shapes.test 的溢出用例和 factory.test 的循环输入用例。
+- [x] **【人工填写】[已填写]** PR03：在 §2.4 填写本人对结构封装、深副本及失败原子性的真实反思；本轮验收意见与是否提交由本人决定，不代填通过或执行 commit。
 
-- [ ] **【人工核对】[已核验]** PR04：在本报告 §1/§3 PR04 字段及 architecture.md §14 填写结论；抽查 Executor 的准备/单次提交、Session 的副本访问/一次绑定、History 的完整快照与 blocked，确认不按命令名分派且没有 CLI/真实 IO。
-- [ ] **【人工核对】[已核验]** PR04：运行 typecheck、npm test 及 §4.6 的专项命令，复现 89/49 项通过；重点查看四个克隆阶段故障、候选校验故障、边界后重新编辑和异步重叠拒绝用例。UML 实际图尚未渲染，可用预览工具核对布局/语法。
-- [ ] **【人工填写】[已填写]** PR04：在 §2.5 记录真实反思与测试观察，确认每 Session 一个 Executor/逐次 await 的调用约定；个人验收与提交决定保留给本人，不代填或执行暂存、提交、推送。
-- [ ] **【人工核对】[已核验]** 测试说明补充：对照三份测试源码抽查 `tests/doc/PR4_test.md`，尤其是第 28～29 项历史边界、第 37～40 项克隆阶段与第 48 项异步重叠限制；确认说明符合本人理解，不代填已核验。
+- [x] **【人工核对】[已核验]** PR04：在本报告 §1/§3 PR04 字段及 architecture.md §14 填写结论；抽查 Executor 的准备/单次提交、Session 的副本访问/一次绑定、History 的完整快照与 blocked，确认不按命令名分派且没有 CLI/真实 IO。
+- [x] **【人工核对】[已核验]** PR04：运行 typecheck、npm test 及 §4.6 的专项命令，复现 89/49 项通过；重点查看四个克隆阶段故障、候选校验故障、边界后重新编辑和异步重叠拒绝用例。UML 实际图尚未渲染，可用预览工具核对布局/语法。
+- [x] **【人工填写】[已填写]** PR04：在 §2.5 记录真实反思与测试观察，确认每 Session 一个 Executor/逐次 await 的调用约定；个人验收与提交决定保留给本人，不代填或执行暂存、提交、推送。
+- [x] **【人工核对】[已核验]** 测试说明补充：对照三份测试源码抽查 `tests/doc/PR4_test.md`，尤其是第 28～29 项历史边界、第 37～40 项克隆阶段与第 48 项异步重叠限制；确认说明符合本人理解，不代填已核验。
 
 
-- [ ] **【人工核对】[已核验]** PR05：在本报告 §1/§3 及 architecture.md §15 核对四类职责、真实图、两处分派与逐行 await；特别确认仅独立整行注释、引号无转义及 quoted in 规则。结论填写在对应字段。2026-10-31 的 create HEX 补充校验另见本节新增待核验项，原已核验状态不代表新规则已验收。
-- [ ] **【人工核对】[已核验]** PR05：运行 `npm.cmd run cli`，用根 README 的命令示例观察提示符、中文、颜色、树/属性/帮助、错误后继续与 EOF；复现 §4.10 的 145/56 项测试。核对终端排版和键盘退出是否符合本人环境；验收意见:正确运行，能正确执行合法命令，提示并拒绝非法命令，有正确的undo/redo逻辑。
-- [ ] **【人工核对】[已核验]** 注释规则纠偏：核对 §2.2 案例 002 是否准确记录两次人工发现和修正：独立整行注释，以及 create 可选颜色的 # 值须符合 3/4/6/8 位 HEX；普通文本/ID 不受颜色校验影响。检查 §4.10/§4.11 回归证据。案例核对结论：首次修正时，。
-- [ ] **【人工填写】[已填写]** PR05：在 §2.8 填写真实反思与取舍，在 architecture.md §15 填写核对结论；本次提交/创建 PR 决定由本人作出，不代填，不自动执行。
-- [ ] **【人工核对补充（2026-10-31）】[已核验]** PR05 create HEX：在 §1/§3 和 architecture.md §15 的补充字段中确认 `#12/#zi/#中文` 被拒绝，合法 3/4/6/8 位 HEX 被接受，加引号不能绕过；失败不创建图形、不清空 Redo、不解除 blocked，文本/ID 的 # 不受影响。复现 §4.11 的全量 155 项与 CLI 58 项结果；补充验收意见：[已填写]。
-- [ ] **【人工填写补充（2026-10-31）】[已填写]** 在 §2.8 的补充反思中记录此次发现颜色语义漏检的实际观察；确认 §2.2 案例 002 合并两次发现的叙述准确，保留原反思及已核验结论。
+- [x] **【人工核对】[已核验]** PR05：在本报告 §1/§3 及 architecture.md §15 核对四类职责、真实图、两处分派与逐行 await；特别确认仅独立整行注释、引号无转义及 quoted in 规则。结论填写在对应字段。2026-10-31 的 create HEX 补充校验另见本节新增待核验项，原已核验状态不代表新规则已验收。
+- [x] **【人工核对】[已核验]** PR05：运行 `npm.cmd run cli`，用根 README 的命令示例观察提示符、中文、颜色、树/属性/帮助、错误后继续与 EOF；复现 §4.10 的 145/56 项测试。核对终端排版和键盘退出是否符合本人环境；验收意见:正确运行，能正确执行合法命令，提示并拒绝非法命令，有正确的undo/redo逻辑。
+- [x] **【人工核对】[已核验]** 注释规则纠偏：核对 §2.2 案例 002 是否准确记录两次人工发现和修正：独立整行注释，以及 create 可选颜色的 # 值须符合 3/4/6/8 位 HEX；普通文本/ID 不受颜色校验影响。检查 §4.10/§4.11 回归证据。案例核对结论：首次修正时，。
+- [x] **【人工填写】[已填写]** PR05：在 §2.8 填写真实反思与取舍，在 architecture.md §15 填写核对结论；本次提交/创建 PR 决定由本人作出，不代填，不自动执行。
+- [x] **【人工核对补充（2026-10-31）】[已核验]** PR05 create HEX：在 §1/§3 和 architecture.md §15 的补充字段中确认 `#12/#zi/#中文` 被拒绝，合法 3/4/6/8 位 HEX 被接受，加引号不能绕过；失败不创建图形、不清空 Redo、不解除 blocked，文本/ID 的 # 不受影响。复现 §4.11 的全量 155 项与 CLI 58 项结果；补充验收意见：[已填写]。
+- [x] **【人工填写补充（2026-10-31）】[已填写]** 在 §2.8 的补充反思中记录此次发现颜色语义漏检的实际观察；确认 §2.2 案例 002 合并两次发现的叙述准确，保留原反思及已核验结论。
+
+
+- [x] **【人工核对】[已核验]** PR06 架构：填写本报告 §1/§3 与 architecture.md §16 的结论，抽查 Context.deferBeforeCommit、Executor 准备/写入/提交顺序、FileStore 同目录替换与失败清理，确认磁盘/内存非原子窗口和 D1～D6 一致。
+- [x] **【人工核对】[已核验]** PR06 文件展示：用 `npm.cmd run cli` 执行根 README 的 save/read 示例，实际用浏览器打开生成的 demo.svg，检查六类、中文/特殊字符、组样式继承与顺序；再 read 后编辑/undo/redo/save。演示结果：根目录下的demo.svg文件。
+- [x] **【人工核对】[已核验]** PR06 边界与测试：复现 §4.12 的 242 项全量及 87 项专项；核对缺 ID 警告、非法 XML/transform/viewBox、无参 save 与 save-as 路径、失败后状态/旧文件保持。缺失根尺寸 800×600 等规则已由本轮回复确认，但实际行为仍须核验。结论：已手动在终端测试以上命令，没有问题。
