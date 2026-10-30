@@ -45,7 +45,12 @@ export class ShapeFactory {
     }
     const shape = definition.build(id, params);
     if (definition.optionalStyle && params.length > required) {
-      shape.setAttribute(definition.optionalStyle, params[required]);
+      const style = ModelValue.text(params[required], definition.optionalStyle);
+      const color = style.trim();
+      if (color.startsWith("#") && !/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(color)) {
+        throw new ModelError(`invalid hex color: ${style}`);
+      }
+      shape.setAttribute(definition.optionalStyle, style);
     }
     return shape;
   }
