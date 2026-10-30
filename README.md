@@ -2,7 +2,7 @@
 
 《高级软件开发技术》Lab1 Phase 1：基于 TypeScript 的命令行 SVG 编辑器。
 
-> **当前状态：PR 03 核心模型已实现，待人工验收。** PR 02 已合并；`src/model/` 已包含六种图形、文档树、集中工厂与深拷贝，测试覆盖模型行为。CLI 尚未接入模型，程序仍只输出启动消息；下文命令行 SVG 编辑能力仍为计划。
+> **当前状态：PR 04 Command 系统与完整快照 Undo/Redo 已实现，课程报告已记录人工验收结论。** PR 03 已合并；现在可用 TypeScript 构造命令，由执行器统一完成编辑、查询和历史操作。终端 REPL、解析分发和实际 SVG 文件读写尚未实现，`npm start` 仍只输出启动消息。实现与验收记录见 [课程报告](doc/README.md)。
 
 ## 1. 项目目标
 
@@ -39,14 +39,16 @@ svg> save demo.svg
 
 ## 3. Phase 1 功能范围
 
-| 类别 | 计划支持的命令或能力 |
-| --- | --- |
-| 文档管理 | `init`、`read`、`save`、`canvas` |
-| 图形创建与编辑 | `create`、`delete`、`move`、`scale`、`set` |
-| 分组与层级 | `group`、`ungroup`、`addto`、`front`、`back` |
-| 信息查看 | `tree`、`show`、`help` |
-| 操作历史 | `undo`、`redo` |
-| 图形类型 | `rect`、`circle`、`ellipse`、`line`、`text`、`g` |
+| 类别 | 命令或能力 | 当前进度 |
+| --- | --- | --- |
+| 文档管理 | `init`、`read`、`save`、`canvas` | Init/Canvas 命令 API 已实现；Read/Save 待实现 |
+| 图形创建与编辑 | `create`、`delete`、`move`、`scale`、`set` | 模型与命令 API 已实现 |
+| 分组与层级 | `group`、`ungroup`、`addto`、`front`、`back` | 模型与命令 API 已实现 |
+| 信息查看 | `tree`、`show`、`help` | 结构化结果 API 已实现；终端呈现待实现 |
+| 操作历史 | `undo`、`redo` | 完整快照、历史边界和失败原子性已实现 |
+| 图形类型 | `rect`、`circle`、`ellipse`、`line`、`text`、`g` | 模型已实现 |
+
+以上命令尚未接入终端 REPL。课程报告 §4.6 记录全量 89 项测试通过，其中 PR04 新增 49 项；逐项说明见 [PR4_test.md](tests/doc/PR4_test.md)。
 
 重要行为约定：
 
@@ -77,7 +79,7 @@ npm test
 npm run dev
 ```
 
-其中 `build` 编译源码到 `dist/`，`start` 运行已编译入口，`dev` 构建后运行，`typecheck` 检查源码和测试的类型。`test` 先构建程序，再用独立配置编译测试，最后使用 Node.js 内置测试工具执行 `tests/*.test.ts` 对应的全部测试（模型行为及启动 smoke test）。
+其中 `build` 编译源码到 `dist/`，`start` 运行已编译入口，`dev` 构建后运行，`typecheck` 检查源码和测试的类型。`test` 先构建程序，再用独立配置编译测试，最后使用 Node.js 内置测试工具执行 `tests/*.test.ts` 对应的全部测试（命令、历史、模型行为及启动 smoke test）。
 
 Windows PowerShell 若因执行策略无法运行 `npm.ps1`，将上述 `npm` 换成 `npm.cmd`，例如 `npm.cmd test`；无需修改系统执行策略。
 
@@ -89,9 +91,35 @@ SVG Editor CLI started!
 
 这只是环境自检，不代表完整 CLI 已经实现。
 
-## 5. 目录规划
+### 当前可用的 TypeScript 命令 API
 
-以下为**初始规划**，最终架构须在设计阶段确定，变更应记录在文档中：
+以下示例供源码调用方参考，不是新的终端入口：
+
+```typescript
+import { EditorSession } from "./src/commands/EditorSession";
+import { CommandExecutor } from "./src/commands/CommandExecutor";
+import { InitCommand } from "./src/commands/InitCommand";
+import { CreateCommand } from "./src/commands/CreateCommand";
+import { MoveCommand } from "./src/commands/MoveCommand";
+import { ShowCommand } from "./src/commands/ShowCommand";
+
+async function example() {
+  const session = new EditorSession();
+  const executor = new CommandExecutor(session);
+  await executor.execute(new InitCommand());
+  await executor.execute(new CreateCommand("rect", "r1", [10, 20, 100, 50, "red"]));
+  await executor.execute(new MoveCommand("r1", 30, 20));
+  await executor.undo();
+  const result = await executor.execute(new ShowCommand("r1"));
+  return result.data; // x=10、y=20；结构化数据交给未来 Renderer 展示
+}
+```
+
+同一 Session 绑定一个 Executor；每次操作必须 await 完成，重叠调用会报 `error: command executor is busy`。`session.requireDocument()` 返回独立副本，修改副本不影响会话。init 和修改 canvas 会清空并封锁历史，下一次成功编辑后重新解禁；查询不影响历史。HelpCommand 接收外部提供的只读语法列表。ReadCommand/SaveCommand 尚未实现，`src/io/SvgStore.ts` 仅定义未来 IO 契约。
+
+## 5. 当前目录与职责
+
+以下为当前主要目录；整体架构与实际实现范围见 [architecture.md](doc/architecture.md)，PR04 实际架构见其 §14：
 
 ```text
 .
@@ -99,16 +127,19 @@ SVG Editor CLI started!
 ├── README.md                      # 项目入口文档（本文件）
 ├── doc/
 │   ├── README.md                  # 课程要求的架构与过程文档
+│   ├── architecture.md            # 已确认决策与各阶段实现说明
+│   ├── pics/                      # 架构配图
 │   └── requirements/
 │       └── phase_cli_1.md         # 原始任务书
 ├── src/
-│   ├── cli/                       # 命令行交互与解析
-│   ├── commands/                  # Command 执行与编辑操作
-│   ├── model/                     # 文档与图形对象模型
-│   ├── io/                        # SVG 读写
-│   └── main.ts                    # 程序入口
+│   ├── cli/                       # 预留；REPL、解析和呈现待实现
+│   ├── commands/                  # 已实现命令、会话与完整快照历史
+│   ├── model/                     # 已实现文档与六类图形模型
+│   ├── io/                        # 仅 SvgStore 接口，实际读写待实现
+│   └── main.ts                    # 仅启动消息，尚未接入命令系统
 ├── tests/
-│   └── smoke.test.ts              # 最小启动验证
+│   ├── *.test.ts                  # 模型、命令、历史、原子性和启动测试
+│   └── doc/                       # PR3_test.md、PR4_test.md 测试说明
 ├── package.json
 ├── package-lock.json
 ├── tsconfig.json                  # 仅编译 src/
@@ -126,14 +157,14 @@ SVG Editor CLI started!
 | PR 01 | `chore/INIT-001-project-setup` | 初始化 TypeScript 工程、基础目录及构建验证 |
 | PR 02 | `docs/ARCH-001-design` | 明确模块职责、依赖方向、Command / Composite 设计 |
 | PR 03 | `feat/MODEL-001-shape-document` | 实现图形类、文档模型、层级与 ID 管理 |
-| PR 04 | `feat/CLI-001-command-infrastructure` | 实现 REPL、解析分发和命令执行框架 |
-| PR 05 | `feat/EDIT-001-shape-operations` | 实现图形创建、删除及属性和几何编辑 |
-| PR 06 | `feat/EDIT-002-group-operations` | 实现分组、解组、归属变更和层级顺序 |
-| PR 07 | `feat/HISTORY-001-undo-redo` | 完善命令历史、撤销重做及 IO 边界 |
+| PR 04 | `feat/CMD-001-command-execution` | Command、会话、编辑/查询命令及完整快照 Undo/Redo（已实现，课程报告已记录人工验收） |
+| PR 05 | `feat/CLI-001-command-infrastructure` | 后续拟实现 REPL、解析、分发与结果呈现 |
+| PR 06 | `feat/EDIT-002-group-operations` | 原计划的结构操作已在模型/命令实现，后续验证 CLI 集成，具体 PR 待确认 |
+| PR 07 | `feat/HISTORY-001-undo-redo` | 原计划的核心历史已在 PR04 实现，后续完善 CLI/IO 集成验证，具体 PR 待确认 |
 | PR 08 | `feat/IO-001-svg-persistence` | 完善文档命令及 SVG 读写 |
 | PR 09 | `test/QA-001-final-validation` | 集成测试、架构一致性自查与最终文档 |
 
-**实施说明：** Command 接口及可撤销操作的设计应从 PR 04/05 开始考虑，不能等到 PR 07 才整体重写。用于早期测试的最小文档初始化能力可先实现，完整 IO 语义在 PR 08 验证。
+**实施说明：** 本轮按用户要求将命令和完整快照历史集中在 PR04 完成，REPL 留给 PR05。表中后续分支仍为建议，执行范围以具体任务为准；完整文件 IO 语义留待后续阶段验证，不把内存命令测试当作 SVG 文件验收。
 
 ### 每个 PR 的基本流程
 

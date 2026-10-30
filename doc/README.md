@@ -6,6 +6,55 @@
 
 ## 1. 架构方案
 
+### PR 04 Command 与快照历史（2026-10-30，已人工验收）
+
+当前在 `feat/CMD-001-command-execution` 完成命令层，复用 PR03 模型，已确认 D1–D6 保持不变。整体架构目标图和历史记录继续保留；本轮实际组件及取舍见 [architecture.md §14](architecture.md#14-pr-04-command-与完整快照历史实现2026-10-30)。
+
+PR04 新增 49 项测试的逐项说明见 [PR4_test.md](../tests/doc/PR4_test.md)。本次测试说明补充无架构变化。
+
+根 README 进度同步：本轮无架构变化，仅将项目入口的 PR04 验收状态、功能进度及目录职责与本报告对齐。
+
+| 实际文件 | 职责 |
+|---|---|
+| `src/commands/Command.ts` | 泛型异步协议，name、effect、requiresDocument 元数据；具体行为多态执行 |
+| `CommandContext.ts`、`CommandResult.ts` | 命令局部草稿/替换意图；结构化成功数据及警告的复制、冻结；错误用 ModelError 抛出，无终端输出 |
+| `EditorSession.ts` | 私有当前文档/读入路径/历史状态；一次绑定 Executor；公开文档访问返回独立副本 |
+| `CommandExecutor.ts` | 隔离候选、执行、校验、结果准备、快照准备、单次状态提交；统一 execute/undo/redo 的并发与错误处理 |
+| `CommandHistory.ts` | 不可变两栈与 blocked；独立完整 before/after 快照；记录身份名称、准备撤销重做及边界清空 |
+| `CreateCommand.ts`、`DeleteCommand.ts`、`MoveCommand.ts`、`ScaleCommand.ts`、`SetCommand.ts` | 图形创建及几何/属性编辑，调用 Factory/Document/Shape 的公开方法 |
+| `GroupCommand.ts`、`UngroupCommand.ts`、`AddToCommand.ts`、`FrontCommand.ts`、`BackCommand.ts` | 层级与顺序命令，整体一个历史单元，按当前 Document 中的 id 定位 |
+| `InitCommand.ts`、`CanvasCommand.ts` | 初始化和画布；Canvas 无参数 query、带尺寸 boundary，失败不产生历史边界 |
+| `TreeCommand.ts`、`ShowCommand.ts`、`HelpCommand.ts` | 层级/属性/父位置查询、注入帮助数据；没有完整终端树形排版或 CLI 依赖 |
+| `src/io/SvgStore.ts` | 仅未来 read/write 异步接口；没有实现类或 Read/Save 命令，不宣称文件 IO 完成 |
+
+```plantuml
+@startuml
+title PR04 实际包依赖（main 尚未接入命令系统）
+component "main.ts\n仅启动消息" as Main
+package "src/commands（已实现）" {
+  component "15 个具体 Command\nContext / Result\nExecutor / Session / History" as Commands
+}
+package "src/model（PR03）" {
+  component "Document / Shape / Factory" as Model
+}
+package "src/io（仅契约）" {
+  interface SvgStore
+}
+Commands --> Model
+SvgStore --> Model : Document 类型
+@enduml
+```
+
+Commands 当前只依赖本模块及模型；未来存储消费仅允许 commands → io/SvgStore 接口，IO 不反向依赖 commands。model 不感知历史、会话或文件。没有新增名称分派点：按名字构造图形仍只有 Factory；未来 CLI 的 Dispatcher 尚未实现。
+
+实际事务流程：对当前文档 clone 候选 → await 多态 execute → 复制结果 → validate 候选 → clone 并 validate 新活文档 → 准备完整 before/after 和新历史 → 构造新状态 → 一次赋值提交。所有克隆、校验、结果/历史准备均在提交前；失败保留文档、路径、两栈和 blocked。Undo/Redo 先准备恢复副本及新历史再提交，Redo 不重执行命令、不反算几何。
+
+init 成功清除读入路径；canvas 修改保留路径，两者均清空并封锁历史。canvas 查询/tree/show/help 不改变历史；下一次成功编辑解除封锁，undo 只能回到边界后的基点。空栈用 nothing to undo/redo，blocked 优先使用任务书的 undo not allowed after io command。无文档时 help 也按任务书严格规则报错。Read/Save 历史和路径完整编排留待 IO 阶段。
+
+实现细化登记：原拟定类图中 Executor 关联 History；实际由 Session 的状态对象持有不可变 History，Executor 仍负责调用和协调，一次提交避免两个可变字段出现部分更新。每个 Session 只绑定一个 Executor；重叠 execute/undo/redo 立即报 busy、不排队，调用方必须逐次 await，不同 Session 可并行。查询也使用文档副本，避免自定义查询改动会话。为防止命令保留候选引用，提交文档另行 clone；额外克隆开销接受，未做性能基准或历史限额。
+
+**【人工核对】[已核验]** 请对照 `CommandExecutor.ts`、`EditorSession.ts`、`CommandHistory.ts` 核对原子状态提交及单执行器约定，确认本轮没有提前接入 REPL 或宣称 read/save 完成。结论：确认一致性。
+
 ### PR 03 核心模型实现（2026-10-29，待人工验收）
 
 本轮在 `feat/MODEL-001-shape-document` 实现 `src/model/`，未改变 PR 02 的四模块依赖方向或 D1–D6。整体目标图仍保留为拟定；当前实际业务组件如下，仅 model 已落地，main 尚不调用模型。
@@ -225,7 +274,13 @@ import { CommandDispatcher } from "../cli/CommandDispatcher";
 - AI 建议：保留四目录，分离解析/分发/执行和 XML/文件职责；采用 Command + 候选副本，模型多态 clone 及 before/after 历史，替代仅靠逆操作。考虑逆操作/局部快照可节省内存，但浮点回算和复合结构恢复增加验证成本，建议作为备选交人工决策，未宣称用户已接受。
 - 实际发现：任务书根级 g 解组限制与常见编辑器习惯不同；跨父 group 的组位置/顺序、普通 g 样式 set、save-as 路径生命周期与外部 transform 范围未完全明确，草案列 D2–D5 供用户确认，没有补写为老师强制规则。
 - 检查与纠正：首次 PowerShell 读取中文显示乱码，显式 UTF-8 重读；首次批量读取输出过长，分文件补读，避免凭截断内容设计。未发生用户与 AI 的代表性设计争论，不编造人工反馈。工程检查和设计检查结果见 §3.3、§4.4。
-- **【人工填写】[待填写]** 请在 §2.2 或此处记录本人实际判断、是否采纳推荐及真实分歧和收获；个人反思：[待填写]。
+- **【人工填写】[已填写]** 请在 §2.2 或此处记录本人实际判断、是否采纳推荐及真实分歧和收获；个人反思：本轮主要围绕 SVG 编辑器的整体架构设计展开。起初，我对任务书要求的软件功能及模块之间的关系理解不够清晰。通过梳理完整的命令执行流程，逐渐明确了 CLI、Commands、Model 和 IO 四个模块的职责：CLI 负责输入解析与命令分发，Commands 负责操作执行和历史管理，Model 负责图形行为与结构约束，IO 负责 SVG 文件读写。采用这种划分，可以避免将输入处理、业务逻辑和状态管理集中在同一模块中，也有利于后续功能扩展。
+
+在设计模式方面，我进一步理解了 Command 模式将操作封装为对象的意义。相比由 CLI 直接修改图形，通过统一执行器管理命令，可以集中处理 Undo/Redo、失败原子性和执行流程，同时减少具体命令与用户交互方式之间的耦合。对于 Composite 模式，我认可通过统一的 Shape 接口处理单个图形与 Group 容器，使移动、缩放等操作能够利用多态完成。
+
+在 D1 撤销重做方案的选择上，我重点比较了逆向操作、完整快照、局部状态记录和结构共享。虽然完整快照存在额外的内存与复制开销，但考虑到本阶段图形规模有限，且 group、delete、ungroup 等操作涉及复杂的父子关系和顺序恢复，最终决定采用完整快照，优先保证实现正确性和可测试性。
+
+对于 D2～D6，我认可普通 Group 遵循 SVG 样式继承、跨父分组采用最深公共祖先规则、保存路径遵循任务书描述，以及保留四模块架构等方案。同时认识到，部分具体行为并非任务书明确规定，而是需要由开发者作出的设计选择。对于外部 SVG 的 transform 等兼容性问题，应明确当前支持范围并保留后续验证事项，不能直接将 AI 的建议视为课程要求。
 
 ### 2.4 PR 03 会话记录（2026-10-29）
 
@@ -240,7 +295,49 @@ import { CommandDispatcher } from "../cli/CommandDispatcher";
 **【人工填写】[已填写]** 请记录本人对“冻结成员序列、按 id 重新定位”和“两阶段几何更新”取舍的真实判断，以及亲自运行模型测试后的观察；如没有分歧如实填写。个人反思：对于 Group 成员序列冻结与按 ID 重新定位，我理解到，Document 不直接暴露可写的 children，可以避免外部代码绕过 Document 修改图形的父子关系和顺序。结构操作通过重建相关 Group 并统一提交，可以更好地维护树结构与索引的一致性。虽然这意味着旧对象引用可能失效，但图形 ID 保持不变，因此后续 Command 可以保存 ID，并在执行时通过 Document 重新查找目标。我接受这一设计取舍。
 对于 两阶段几何更新，我认为其主要价值在于保证失败原子性：先计算并校验所有受影响图形的新几何值，只有全部合法后才统一更新，避免在嵌套 Group 移动或缩放过程中出现部分图形已修改、部分图形因数值溢出而失败的情况。虽然增加了一定的实现复杂度，但有利于保证模型状态可靠，因此接受该方案。
 
+### 2.5 PR 04 会话记录（2026-10-30）
+
+- 分支 `feat/CMD-001-command-execution`。初始工作区干净，PR03 为 `13c7f2a`。fetch 获取 `origin/main=afd4dfb`（Merge pull request #3），祖先检查确认含 PR03。通过本地 fetch 的无强制快进 refspec 将 main 同步至 origin/main，再创建指定分支；未执行 merge、暂存、提交、push 或创建 PR。
+- 阅读 AGENTS、根 README、课程报告、任务书、架构、全部模型和既有测试、package/tsconfig。复核 PR03 只有公开 find/insert/树操作/clone/validate 等方法，不直接写模型私有字段或索引，不改模型实现。
+- 本轮新增 commands 下 21 个 TS 文件（20 类和 1 个命令协议文件）、io/SvgStore 接口、三份命令专项测试；删除 commands/.gitkeep；更新三份入口/课程/架构文档。没有更换工具、依赖或测试配置。
+- AI 建议并实施：用不可变 History + Session 单一状态引用协调提交；Context 只持候选，不给具体命令 Session；公开会话检查返回副本，提交文档再 clone，以隔离命令保留的草稿。并发选择单 Session/单 Executor/重叠拒绝，未引入队列框架。read/save 选择仅保留契约，不做假读写或存储替身实现。
+- 实际问题与纠正：首次 `npm.cmd test` 源码构建成功，但测试编译因异构查询数组的泛型结果推断报 TS2345。将测试集合显式标注 `Command[]`，保留单独执行时的具体结果类型；修正后全量 89 项通过。错误不是业务测试断言失败，不编造人工争论或额外失败过程。
+- 验证再以专项命令单独运行新增 49 项，全部通过；完成源文件 AST 类名/依赖/循环检查，37 个源 TS 文件无跨层违规。具体证据见 §4.6。
+
+**【人工填写】[已填写]** 请记录本人如何理解“候选、提交文档和历史快照相互隔离”“单次会话状态提交”，是否接受拒绝重叠调用的接口约定，以及亲自运行测试后的观察；仅按真实经历填写。个人反思：对于候选文档、正式文档与历史快照的隔离，我认为其主要目的是避免命令执行失败或外部引用修改导致正式状态被意外改变。执行器先在候选 Document 上执行并校验，再分别准备提交文档和历史快照，只有全部成功后才提交。虽然多次深拷贝会增加内存和计算开销，但与此前选择的 D1 完整快照方案一致，能够降低复杂编辑操作的状态恢复难度。
+
+对于单次会话状态提交，我认可由 EditorSession 统一持有 Document、readPath 和 CommandHistory，并由 CommandExecutor 负责协调提交。这样可以避免文档已更新、历史却未成功记录的问题，保证一次命令的状态变化作为整体生效。
+
+在并发处理方面，我接受单 Session、单 Executor、拒绝重叠调用的约定。考虑到本阶段是单用户顺序操作的 CLI 编辑器，没有必要引入额外的并发队列。后续 CLI 应逐条 await 命令执行结果。
+
+根据 Codex 提供的测试报告，PR04 新增的 49 项专项测试覆盖了命令执行、Undo/Redo、历史边界、失败原子性及并发控制。后续仍需结合实际 CLI 和 SVG 文件读写进行完整集成验证。本轮认可上述实现取舍，未发现需要调整 D1～D6 的问题。
+
+### 2.6 PR04 测试说明补充（2026-10-30）
+
+在 `feat/CMD-001-command-execution` 按用户要求仿照 PR3_test.md 新增 `tests/doc/PR4_test.md`，逐项对应实际的 24 项命令、10 项历史和 15 项原子性测试，注明参数化展开、验证边界和运行方式。仅新增测试说明并更新本报告，未改源码、测试断言或配置；PR 待创建、commit 待创建。路径统一使用相对链接，本轮未发生代表性纠错。
+
+### 2.7 根 README 进度同步（2026-10-30）
+
+在 `feat/CMD-001-command-execution` 根据本报告已填写的 PR04 人工验收结论，更新根 `README.md` 的当前状态、功能进度、目录职责及 PR04 规划行，并链接架构与测试说明。仅修改根 README 和本报告，保留已有代码及人工结论；PR 待创建、commit 待创建。本轮未发生代表性纠错。
+
 ## 3. 一致性自查
+
+根 README 同步自查：入口说明区分已实现的模型/命令 API、尚未接入的 CLI 和仅有接口的 IO；PR04 人工验收状态引用本报告，不将验收解释为已提交或已合并。无模块或依赖变化。
+
+PR04 测试说明补充自查：对照三份测试源码核对 49 项顺序与行为，四次克隆阶段按当前 Executor 的执行顺序解释；明确中立数据/命令 API 测试不等于文件 IO/CLI 验收。新增文件为用户指定的 `tests/doc/PR4_test.md`，课程交付主文档仍为本报告。
+
+### PR 04 一致性检查（2026-10-30）
+
+| 项目 | 结果 | 依据与限制 |
+|---|---|---|
+| 模块职责和范围 | 通过（源代码审查） | 15 个具体命令、5 个支撑类；SvgStore 只有接口，main/cli/model 与原模型测试未改动 |
+| 一类一文件 | 通过（TypeScript AST） | commands 下 21 文件、20 类，各类名与文件名一致；没有机械增加每个类的接口 |
+| 源码依赖与环 | 通过（TypeScript AST + DFS） | 37 个 src TS 文件均按本地路径引用，无环；commands 仅依赖本模块/model，io 接口只引用 Document；model 未增加对 Commands/IO/CLI 的依赖 |
+| 分派和输入输出 | 通过（静态扫描及审阅） | Executor 根据 effect 选择事务策略，不按命令名 switch；具体行为多态；没有终端/文件系统调用，没有新增类型名分派 |
+| PR02/PR03 适配 | 通过（源码/测试） | ID 定位、冻结 Group 协议及 D3 均复用模型；D1 完整快照落地，D4 init 清路径和普通编辑保留路径已验证，实际 save 生命周期待实现 |
+| 历史原记录与新图 | 已登记 | 新实际图在 §1/architecture.md §14；旧目标图和人工字段保留，Session 持有 History 的细化如实说明 |
+
+**【人工核对】[已核验]** 请核对新实际图与代码调用关系、effect 的三类职责以及失败前后文档/两栈/blocked 保持；自动检查不代替个人认可。结论：在调用关系上，CommandExecutor 通过 EditorSession 获取和提交会话状态，EditorSession 统一持有 Document、readPath 和 CommandHistory，Executor 负责执行命令及准备历史转移。该实现与 §14 实际架构图一致，没有引入反向依赖或循环依赖。关于effect的三类职责：edit 负责编辑文档并记录历史；boundary 负责建立历史边界，清空 Undo/Redo 并设置 blocked；query 只返回查询结果，不修改正式文档或历史。CanvasCommand 能够根据参数区分查询与修改，符合任务书要求。最后失败前后文档/两栈/blocked保持，CommandExecutor 在候选文档上完成操作、校验、复制和历史准备，成功后由 Session 一次性提交。根据已有专项测试，命令失败时 Document、Undo 栈、Redo 栈及 blocked 状态保持不变，避免发生部分提交。
 
 ### PR 03 一致性检查（2026-10-29）
 
@@ -358,9 +455,41 @@ PR 01：业务架构与模块依赖关系暂不适用，待后续实现。检查
 
 已知限制：结构操作需要遍历重建索引，Group 构造还校验子树，深层大树可能有额外遍历成本；未做深度/性能基准。结构变更后应重新 find 容器 id。fromSvgNode 期望已解析/规范化节点，不能代替 SVG Parser。用户人工验收仍待完成。
 
+### 4.6 PR 04 验证记录（2026-10-30）
+
+| 实际命令/检查 | 实际结果 | 证据及限制 |
+|---|---|---|
+| `npm.cmd run typecheck` | 通过，退出码 0 | 源码初版及新增测试修正后均运行；检查 src/tests |
+| 首次 `npm.cmd test` | 失败，测试编译退出码 1 | src build 成功；command-history.test 的异构查询数组产生 TS2345；修正测试类型标注后重跑 |
+| 修正后 `npm.cmd test` | 通过，退出码 0；89 pass / 0 fail | 内部完成 `npm run build` 与测试编译；保留既有 40 项，新增 49 项 |
+| `node --test dist/tests/tests/commands.test.js dist/tests/tests/command-history.test.js dist/tests/tests/command-atomicity.test.js` | 通过，退出码 0；49 pass / 0 fail | 新增专项单独执行；不依赖只有模型的原测试代替命令验证 |
+| 临时 Node + TypeScript AST/依赖 DFS（stdin 执行） | 通过 | 37 个源 TS 文件，commands 21 文件/20 类；文件类名一致、路径存在、无循环依赖；commands 无 switch/终端/文件系统调用 |
+| model/cli/main、package/锁文件、tsconfig、原测试及任务书 diff | 无输出 | 未重写原模型/测试，不提前实施 REPL 或实际 IO；io 仅新增 SvgStore.ts |
+| `git diff --check`、新增文件空白与文档相对链接检查 | 通过 | 单独检查 25 个新增源码/测试文件无行尾空白；三份文档相对链接目标存在、UML 起止配对；未运行渲染器 |
+
+新增测试按文件划分：
+
+- `tests/commands.test.ts` **24 项**：六类创建及 in；十种编辑分别校验实际行为并一次 undo/redo 恢复完整结构；init、无文档错误、tree/show/help 数据、canvas effect/路径、参数数组隔离、Session 外部副本/单执行器、非法命令保留 redo。
+- `tests/command-history.test.ts` **10 项**：连续精确快照恢复、浮点不逆算、原本未设置样式恢复、成功无变化编辑、新编辑清 redo、查询保持 redo、init/canvas 历史边界、blocked 解禁、失败保持边界、空栈、输入/恢复副本与历史独立、命令按 id 复用、会话检查副本隔离。
+- `tests/command-atomicity.test.ts` **15 项**：执行中部分草稿修改后抛错、候选 validate 故障、候选/提交/before/after 四次 clone 故障、History.record 准备后故障、边界历史准备故障、结果复制故障、Undo/Redo 克隆故障、保留草稿隔离、查询副本隔离、禁止 edit 改路径、重叠 edit/query/undo/redo 拒绝、不同会话并行及异步失败解除 busy。
+
+故障通过测试自定义 Command 和 Node test mock 注入，不在生产代码加入“失败开关”。断言比较实际文档中立节点、父位置/索引、readPath、两栈数量、blocked，且再执行 redo/正常编辑证明失败后仍可继续使用。
+
+未运行/未覆盖：真实 ReadCommand/SaveCommand、SvgFileStore/XML、缺 id 警告文件回读、REPL/字符串解析/终端格式、浏览器展示、性能与覆盖率、lint、UML 渲染。本轮未配置 lint/覆盖率工具；不报告虚构百分比。现有 §4.2 全阶段 CLI 功能项仍保留未验证，不以本轮 TypeScript API 通过冒充最终验收。
+
+### 4.7 PR04 测试说明文档验证（2026-10-30）
+
+本次仅文档变更，对照测试源码和既有 49/89 项结果编写说明；未重新运行 build/typecheck/npm test，不把既有结果当作本次重跑。实际执行文档表格编号/分组数量、相对链接目标、行尾空白及 `git diff --check` 检查，结果见本轮汇报。无架构或依赖变化。
+
+### 4.8 根 README 同步验证（2026-10-30）
+
+本轮仅修改文档；检查根 README 与本报告的进度一致性、两份文档的本地相对链接和 `git diff --check`。未运行 npm 构建、类型检查或测试；根 README 的 89/49 项结果引用 §4.6 既有记录，不作为本轮重跑结果。
+
 ## 5. 本次会话待人工处理清单
 
 > AI 每次开发会话结束时更新这里，只保留当前仍未处理的问题；已解决事项迁移到相应章节的审查结论或记录中。不得替用户填“已审核”。
+
+- [ ] **【人工核对】[待核验]** 根 README 进度同步：核对根 `README.md` 的当前状态、第 3/5/6 节与本报告 PR04 验收结论是否一致；确认命令 API 已实现、CLI/真实 IO 待实现的表述准确。核对结论：[待填写]。
 
 - [ ] **【人工核对】[已核验]** 对照 `package.json`、两份 tsconfig、`src/main.ts` 和 `tests/smoke.test.ts`，复核第 1 节工程基线、第 3 节一致性自查，确认目录创建没有被误写为完成业务架构。[判断]没有被误写为完成业务架构
 - [ ] **【人工核对】[已核验]** 在本机用 `npm.cmd run build`、`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd start` 复现第 4.1 节结果，确认启动输出和 1 项测试；第 4.3 节保留个人验收结论。[判断]复现成功，确认启动输出和测试没问题。
@@ -372,3 +501,7 @@ PR 01：业务架构与模块依赖关系暂不适用，待后续实现。检查
 - [ ] **【人工核对】[已核验]** PR03：对照本报告 §1 PR03 实现图、§3 PR03 自查及 architecture.md §13，抽查 `Group.ts` 的冻结数组/withChildren/clone 和 `Document.ts` 的 transform/commit；确认结构操作后按 id 重定位可接受，并确认没有实现 CLI/Commands/IO。
 - [ ] **【人工核对】[已核验]** PR03：运行 `npm.cmd run typecheck`、`npm.cmd test`，复现 §4.5 的 40 项通过；特别查看 document.test 的 D3 嵌套跨父用例、shapes.test 的溢出用例和 factory.test 的循环输入用例。
 - [ ] **【人工填写】[已填写]** PR03：在 §2.4 填写本人对结构封装、深副本及失败原子性的真实反思；本轮验收意见与是否提交由本人决定，不代填通过或执行 commit。
+- [ ] **【人工核对】[已核验]** PR04：在本报告 §1/§3 PR04 字段及 architecture.md §14 填写结论；抽查 Executor 的准备/单次提交、Session 的副本访问/一次绑定、History 的完整快照与 blocked，确认不按命令名分派且没有 CLI/真实 IO。
+- [ ] **【人工核对】[已核验]** PR04：运行 typecheck、npm test 及 §4.6 的专项命令，复现 89/49 项通过；重点查看四个克隆阶段故障、候选校验故障、边界后重新编辑和异步重叠拒绝用例。UML 实际图尚未渲染，可用预览工具核对布局/语法。
+- [ ] **【人工填写】[已填写]** PR04：在 §2.5 记录真实反思与测试观察，确认每 Session 一个 Executor/逐次 await 的调用约定；个人验收与提交决定保留给本人，不代填或执行暂存、提交、推送。
+- [ ] **【人工核对】[已核验]** 测试说明补充：对照三份测试源码抽查 `tests/doc/PR4_test.md`，尤其是第 28～29 项历史边界、第 37～40 项克隆阶段与第 48 项异步重叠限制；确认说明符合本人理解，不代填已核验。
